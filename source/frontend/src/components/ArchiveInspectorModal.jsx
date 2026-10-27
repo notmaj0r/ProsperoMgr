@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Button from './Button.jsx'
+import PasswordInput from './PasswordInput.jsx'
 import { ChevronRightIcon, CloseIcon, FileIcon, FolderIcon, LockIcon, ZipIcon } from './icons.jsx'
 import { api } from '../lib/api.js'
 import { useDismiss } from '../lib/useDismiss.js'
@@ -131,15 +132,13 @@ export default function ArchiveInspectorModal({ path, name, onClose, onExtractAl
                 <span className="grid h-11 w-11 place-items-center rounded-xl bg-warn/15 text-warn"><LockIcon size={20} /></span>
                 <div className="text-sm font-semibold text-text">{t('archive.passwordRequired')}</div>
                 <div className="flex w-full max-w-xs gap-1.5">
-                  <input
-                    type="password"
+                  <PasswordInput
+                    className="min-w-0 flex-1"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), unlock())}
                     placeholder={t('archive.passwordPlaceholder')}
-                    dir="ltr"
                     autoFocus
-                    className="min-w-0 flex-1 rounded-lg border border-panel-border bg-bg px-3 py-2 text-sm text-text outline-none focus:border-accent"
                   />
                   <Button tone="neutral" disabled={!password || unlocking} onClick={unlock}>
                     {unlocking ? t('common.working') : t('archive.unlock')}

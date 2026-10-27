@@ -26,7 +26,7 @@ Prospero brings the most common PS5 homebrew-management workflows together in on
 
 - Browse and manage PS5 storage;
 - Upload and download large files;
-- Create, inspect, download, and extract ZIP archives — extract RAR archives too, including password-protected ones;
+- Create, inspect, download, and extract ZIP archives — extract RAR archives too, with password-protected ZIP and RAR support;
 - Preview images without downloading them;
 - Manage and launch payloads;
 - Browse community payload repositories and track new releases;
@@ -57,7 +57,7 @@ Screenshots can be added here later, for example:
 
 - **Native file manager** — browse internal, USB, and extended storage; upload, download, rename, copy, move, delete, multi-select, keyboard navigation, and run long operations as background jobs.
 - **High-speed transfers** — adaptive resumable uploads, large streamed downloads, PS5-specific socket/file-transfer tuning, and browser-friendly transfer handling.
-- **Archive tools** — streamed and cancelable ZIP creation/extraction, RAR extraction (including password-protected archives), live per-file progress, multiple compression modes, archive inspection, temporary **Download as ZIP**, conflict handling with replace/skip/keep-both, and ZIP Slip/path-traversal protection.
+- **Archive tools** — streamed and cancelable ZIP creation/extraction, password-protected ZIP and RAR extraction, live per-file progress, multiple compression modes, archive inspection, temporary **Download as ZIP**, conflict handling with replace/skip/keep-both, and ZIP Slip/path-traversal protection.
 - **Image preview** — view PNG, JPG, GIF, BMP, and WEBP files without downloading them.
 - **Payload library** — upload and manage local payloads, favorites, enable/disable state, launch/stop actions, and separate visibility for payload-like processes started outside Prospero.
 - **Payload Repositories** — curated community projects grouped by developer, latest-release checks, custom repositories, and direct links to the real upstream GitHub/Gitea project pages.
@@ -135,7 +135,7 @@ It supports:
 - Rename;
 - Delete;
 - ZIP creation;
-- ZIP and RAR extraction, including password-protected RAR archives;
+- ZIP and RAR extraction, including password-protected archives;
 - Image preview;
 - Download as ZIP;
 - Background file jobs;
@@ -178,7 +178,7 @@ Prospero can:
 
 - Inspect archive metadata before extraction;
 - Extract into a dedicated folder or selected destination;
-- Prompt for a password when a RAR archive is encrypted;
+- Prompt for a password when a ZIP or RAR archive is encrypted (ZIP: traditional ZIP encryption and WinZip AES-128/192/256);
 - Report per-file progress;
 - Preserve empty directories;
 - Cancel a large extraction;

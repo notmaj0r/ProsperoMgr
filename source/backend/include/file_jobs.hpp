@@ -26,7 +26,7 @@ struct FileJobInfo {
     std::string compression = "smart";    // zip only: smart, store, fast, balanced
     std::string conflict_policy = "skip"; // skip, replace, keep_both; copy/move also accept cancel
     bool delete_source_on_success = false; // unzip only
-    std::string archive_password; // unzip only, .rar sources — never serialized to JSON
+    std::string archive_password; // unzip only, encrypted .rar/.zip sources — never serialized to JSON
     // Download-as-ZIP writes into the temp archive area, not the visible
     // tree — /api/ftp/download unlinks it the moment it opens the file.
     bool ephemeral = false;
@@ -54,7 +54,8 @@ bool QueueZipJob(const std::vector<std::string> &sources, const std::string &des
 bool QueueDownloadZipJob(const std::vector<std::string> &sources, const std::string &name,
                          uint64_t *job_id, std::string *out_path, std::string *err);
 // `destination` may already exist — entries merge into it per `conflict_policy`.
-// `password` only applies to a .rar source — ZIP archives aren't encrypted here.
+// `password` is used for encrypted .rar and .zip sources (ZipCrypto and WinZip AES);
+// it's ignored for archives that aren't encrypted.
 bool QueueUnzipJob(const std::string &source, const std::string &destination, const std::string &conflict_policy,
                    bool delete_source_on_success, const std::string &password, uint64_t *job_id, std::string *err);
 std::vector<FileJobInfo> GetFileJobs();
@@ -83,7 +84,7 @@ struct ArchiveInfo {
 };
 
 // Reads only the ZIP central directory, never decompresses entries. `code` is set
-// to "password_required" for an encrypted .rar with no/wrong password given.
+// to "password_required" for an encrypted .rar or .zip with no/wrong password given.
 bool ReadArchiveInfo(const std::string &path, const std::string &password, ArchiveInfo *out,
                      std::string *err, std::string *code = nullptr);
 

@@ -2,6 +2,13 @@
 
 Versions older than the current release are collapsed below — click a version to expand it.
 
+## Unreleased
+
+### Added
+- **Extract password-protected `.zip` archives.** Extract and Open Archive now ask for the password when a ZIP is encrypted, the same way they already did for `.rar`. Supports the traditional ZIP encryption and WinZip AES-128/192/256.
+- **A password field in the multi-archive Extract dialog**, so a batch of protected archives can be extracted with one password.
+- **Show/hide toggle on archive password fields.**
+
 ## v1.1
 
 ### Fixed

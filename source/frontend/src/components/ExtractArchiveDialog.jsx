@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Dialog } from './Dialog.jsx'
 import Button from './Button.jsx'
 import Checkbox from './Checkbox.jsx'
+import PasswordInput from './PasswordInput.jsx'
 import PathPickerModal from './PathPickerModal.jsx'
 import { LockIcon } from './icons.jsx'
 import { api } from '../lib/api.js'
@@ -99,7 +100,9 @@ export default function ExtractArchiveDialog({ entries, sourceDir, volumes, onCl
     try {
       const jobIds = []
       for (const entry of entries) {
-        const result = await api.ftp.unzip(archivePathOf(entry), destinationFor(entry), conflictPolicy, deleteSource, single ? password : undefined)
+        // A batch can't be probed one by one, so its optional password goes to every job;
+        // archives that aren't encrypted just ignore it.
+        const result = await api.ftp.unzip(archivePathOf(entry), destinationFor(entry), conflictPolicy, deleteSource, password || undefined)
         jobIds.push(result.job_id)
       }
       onExtracted(jobIds)
@@ -145,15 +148,13 @@ export default function ExtractArchiveDialog({ entries, sourceDir, volumes, onCl
                   <LockIcon size={14} /> {t('archive.passwordRequired')}
                 </div>
                 <div className="flex gap-1.5">
-                  <input
-                    type="password"
+                  <PasswordInput
+                    className="min-w-0 flex-1"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), unlock())}
                     placeholder={t('archive.passwordPlaceholder')}
-                    dir="ltr"
                     autoFocus
-                    className="min-w-0 flex-1 rounded-lg border border-panel-border bg-bg px-3 py-2 text-sm text-text outline-none focus:border-accent"
                   />
                   <Button tone="neutral" disabled={!password || unlocking} onClick={unlock}>
                     {unlocking ? t('common.working') : t('archive.unlock')}
@@ -229,6 +230,19 @@ export default function ExtractArchiveDialog({ entries, sourceDir, volumes, onCl
                 {t('archive.deleteAfterExtract')}
               </span>
             </div>
+
+            {!single && (
+              <div className="mb-3 space-y-1.5">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-text-dim">
+                  <LockIcon size={12} /> {t('archive.passwordOptional')}
+                </div>
+                <PasswordInput
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={t('archive.passwordPlaceholder')}
+                />
+              </div>
+            )}
 
             {single && space && (
               <div className={`flex items-center justify-between border-t border-panel-border pt-3 text-xs ${spaceBlocked ? 'text-err' : 'text-text-dim'}`}>

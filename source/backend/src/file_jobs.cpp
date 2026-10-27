@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <cstdlib>
 #include <thread>
@@ -29,6 +30,7 @@
 #include "file_manager.hpp"
 #include "miniz.h"
 #include "unrar/dll.hpp"
+#include "zip_crypto.hpp"
 
 namespace fs = std::filesystem;
 
@@ -1257,8 +1259,74 @@ bool RunUnrarExtraction(FileJobInfo job, std::string *err) {
     return true;
 }
 
+struct FdGuard {
+    int fd = -1;
+    ~FdGuard() { if (fd >= 0) close(fd); }
+};
+
+zipcrypto::EntryInfo EncryptedEntryInfo(const mz_zip_archive_file_stat &stat) {
+    zipcrypto::EntryInfo info;
+    info.local_header_ofs = stat.m_local_header_ofs;
+    info.comp_size = stat.m_comp_size;
+    info.crc = stat.m_crc32;
+    info.bit_flag = stat.m_bit_flag;
+    info.method = stat.m_method;
+    return info;
+}
+
+// Maps a failed zipcrypto open onto the job error code and message the UI keys off.
+void DescribeZipOpenFailure(zipcrypto::OpenResult result, const char *entry, std::string *err, std::string *code) {
+    const char *c = "invalid_zip";
+    std::string msg = "could not read " + std::string(entry) + " from the archive";
+    switch (result) {
+    case zipcrypto::OpenResult::kBadPassword:
+        c = "password_required";
+        msg = "this archive needs a password";
+        break;
+    case zipcrypto::OpenResult::kUnsupported:
+        c = "unsupported_encryption";
+        msg = "this archive uses an encryption or compression method that isn't supported";
+        break;
+    default:
+        break;
+    }
+    if (err) *err = msg;
+    if (code) *code = c;
+}
+
+// A ZIP's central directory is never encrypted, so an encrypted archive opens and
+// lists fine — the password only matters once an entry is read. Trial-opens the
+// first encrypted entry so a missing/wrong password surfaces up front, the same
+// way a .rar does. True when the archive isn't encrypted or the password fits.
+bool VerifyZipPassword(mz_zip_archive *zip, const std::string &path, const std::string &password,
+                       std::string *err, std::string *code) {
+    mz_uint count = mz_zip_reader_get_num_files(zip);
+    for (mz_uint i = 0; i < count; i++) {
+        mz_zip_archive_file_stat stat {};
+        if (!mz_zip_reader_file_stat(zip, i, &stat)) continue;
+        if (mz_zip_reader_is_file_a_directory(zip, i) || !zipcrypto::IsEncrypted(stat.m_bit_flag)) continue;
+
+        FdGuard guard;
+        guard.fd = open(path.c_str(), O_RDONLY);
+        if (guard.fd < 0) {
+            if (err) *err = "could not open the zip — is it valid?";
+            if (code) *code = "invalid_zip";
+            return false;
+        }
+        zipcrypto::OpenResult result;
+        auto reader = zipcrypto::EntryReader::Open(guard.fd, EncryptedEntryInfo(stat), password, &result);
+        if (reader) return true;
+        DescribeZipOpenFailure(result, stat.m_filename, err, code);
+        return false;
+    }
+    return true;
+}
+
 // Streamed via mz_zip_reader_extract_iter_* instead of extract_to_file —
 // bounded memory, and cancellation/progress checked every buffer, not per file.
+// Encrypted entries can't go through miniz, so they're read raw, decrypted and
+// inflated by zipcrypto::EntryReader, which hands back plaintext in the same
+// buffer-at-a-time shape.
 bool RunUnzip(FileJobInfo job, std::string *err) {
     if (IsRarFilename(job.source)) return RunUnrarExtraction(job, err);
     fs::path source(job.source), destination(job.destination);
@@ -1300,6 +1368,16 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
         item_count++;
         file_indices.push_back(i);
     }
+    {
+        std::string password_err, password_code;
+        if (!VerifyZipPassword(&zip, job.source, job.archive_password, &password_err, &password_code)) {
+            mz_zip_reader_end(&zip);
+            if (err) *err = password_err;
+            SetErrorCode(job.id, password_code.c_str());
+            return false;
+        }
+    }
+    FdGuard raw_fd; // raw reads of encrypted entries; opened on first use
     UpdateJob(job.id, [&](FileJobInfo &j) { j.total_bytes = total; j.total_items = item_count; j.state = "running"; });
 
     // Exact, not an estimate: `total` is the archive's declared uncompressed size.
@@ -1370,16 +1448,33 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
         }
         (void)chmod(target.parent_path().c_str(), 0777);
 
-        auto *iter = mz_zip_reader_extract_iter_new(&zip, i, 0);
-        if (!iter) {
-            if (err) *err = std::string("could not read ") + stat.m_filename + " from the archive";
-            SetErrorCode(job.id, "crc_failed");
-            ok = false;
-            break;
+        // Exactly one of these is set: miniz handles plain entries, zipcrypto the encrypted ones.
+        mz_zip_reader_extract_iter_state *iter = nullptr;
+        std::unique_ptr<zipcrypto::EntryReader> encrypted;
+        if (zipcrypto::IsEncrypted(stat.m_bit_flag)) {
+            if (raw_fd.fd < 0) raw_fd.fd = open(job.source.c_str(), O_RDONLY);
+            zipcrypto::OpenResult open_result = zipcrypto::OpenResult::kCorrupt;
+            if (raw_fd.fd >= 0) encrypted = zipcrypto::EntryReader::Open(raw_fd.fd, EncryptedEntryInfo(stat), job.archive_password, &open_result);
+            if (!encrypted) {
+                std::string open_err, open_code;
+                DescribeZipOpenFailure(open_result, stat.m_filename, &open_err, &open_code);
+                if (err) *err = open_err;
+                SetErrorCode(job.id, open_code.c_str());
+                ok = false;
+                break;
+            }
+        } else {
+            iter = mz_zip_reader_extract_iter_new(&zip, i, 0);
+            if (!iter) {
+                if (err) *err = std::string("could not read ") + stat.m_filename + " from the archive";
+                SetErrorCode(job.id, "crc_failed");
+                ok = false;
+                break;
+            }
         }
         int out_fd = open(target.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0666);
         if (out_fd < 0) {
-            mz_zip_reader_extract_iter_free(iter);
+            if (iter) mz_zip_reader_extract_iter_free(iter);
             if (err) *err = "could not create " + relative.string();
             SetErrorCode(job.id, "write_failed");
             ok = false;
@@ -1390,11 +1485,22 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
         bool entry_ok = true;
         uint64_t unsynced = 0;
         auto last_update = std::chrono::steady_clock::now();
+        bool encrypted_reached_end = false;
         for (;;) {
             if (IsCanceled()) { entry_ok = false; break; }
-            size_t got = mz_zip_reader_extract_iter_read(iter, buffer.data(), buffer.size());
-            if (got == 0) break; // end of this entry, or a failure — checked via iter_free() below
-            if (!WriteAll(out_fd, buffer.data(), got)) {
+            const char *chunk = buffer.data();
+            size_t got = 0;
+            if (encrypted) {
+                const uint8_t *plain = nullptr;
+                zipcrypto::Chunk next = encrypted->Next(&plain, &got);
+                if (next == zipcrypto::Chunk::kEnd) { encrypted_reached_end = true; break; }
+                if (next == zipcrypto::Chunk::kError) break; // reported below as corrupt
+                chunk = reinterpret_cast<const char *>(plain);
+            } else {
+                got = mz_zip_reader_extract_iter_read(iter, buffer.data(), buffer.size());
+                if (got == 0) break; // end of this entry, or a failure — checked via iter_free() below
+            }
+            if (!WriteAll(out_fd, chunk, got)) {
                 if (err) *err = "failed writing " + relative.string();
                 SetErrorCode(job.id, "write_failed");
                 entry_ok = false;
@@ -1418,7 +1524,17 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
                 UpdateJob(job.id, [&](FileJobInfo &j) { j.completed_bytes = snapshot; });
             }
         }
-        bool decompress_ok = mz_zip_reader_extract_iter_free(iter) != 0;
+        bool decompress_ok;
+        bool wrong_password = false;
+        if (encrypted) {
+            zipcrypto::VerifyResult verified = zipcrypto::VerifyResult::kIoError;
+            if (encrypted_reached_end) verified = encrypted->Verify();
+            decompress_ok = verified == zipcrypto::VerifyResult::kOk;
+            // ZipCrypto's one-byte password check lets ~1 in 128 wrong passwords through.
+            wrong_password = verified == zipcrypto::VerifyResult::kBadCrc && encrypted->WeakPasswordCheck();
+        } else {
+            decompress_ok = mz_zip_reader_extract_iter_free(iter) != 0;
+        }
         if (entry_ok && unsynced > 0 && !SyncFile(out_fd)) {
             if (err) *err = "failed syncing " + relative.string();
             SetErrorCode(job.id, "write_failed");
@@ -1432,8 +1548,13 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
 
         if (!entry_ok || IsCanceled()) { ok = false; break; }
         if (!decompress_ok) {
-            if (err) *err = "archive data is corrupt: " + std::string(stat.m_filename);
-            SetErrorCode(job.id, "crc_failed");
+            if (wrong_password) {
+                if (err) *err = "this archive needs a password";
+                SetErrorCode(job.id, "password_required");
+            } else {
+                if (err) *err = "archive data is corrupt: " + std::string(stat.m_filename);
+                SetErrorCode(job.id, "crc_failed");
+            }
             ok = false;
             break;
         }
@@ -2212,6 +2333,12 @@ bool ReadArchiveInfo(const std::string &path, const std::string &password, Archi
     mz_zip_archive zip {};
     if (!mz_zip_reader_init_file(&zip, path.c_str(), 0)) {
         if (err) *err = "could not open the zip — is it valid?";
+        return false;
+    }
+    // The listing itself needs no password, but gating it on one is what makes the
+    // UI ask for it before the user starts an extraction that would just fail.
+    if (!VerifyZipPassword(&zip, path, password, err, code)) {
+        mz_zip_reader_end(&zip);
         return false;
     }
     mz_uint count = mz_zip_reader_get_num_files(&zip);
