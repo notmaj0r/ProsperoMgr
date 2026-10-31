@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -37,6 +38,7 @@
 #include "repository.hpp"
 #include "savedata.hpp"
 #include "shadowmount.hpp"
+#include "storage_scan.hpp"
 #include "system_info.hpp"
 #include "thermal.hpp"
 #include "titles.hpp"
@@ -1274,6 +1276,63 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
                                 .Done());
         }
         return HttpResponse::Json(JsonWriter().Raw("volumes", JsonWriter::Array(items)).Done());
+    });
+
+    // ---- Storage analyzer ---------------------------------------------------
+    // One background walk at a time; the result stays in memory for the browse routes.
+
+    server->Route("POST", "/api/storage/scan", [](const HttpRequest &req) {
+        std::string path = JsonExtractString(req.body, "path");
+        if (path.empty()) path = "/user";
+        std::string err;
+        if (!StartStorageScan(path, &err)) return HttpResponse::Error(err, 409);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    server->Route("POST", "/api/storage/scan/cancel", [](const HttpRequest &) {
+        std::string err;
+        if (!CancelStorageScan(&err)) return HttpResponse::Error(err, 409);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    server->Route("GET", "/api/storage/scan/status", [](const HttpRequest &) {
+        StorageScanProgress p = GetStorageScanProgress();
+        return HttpResponse::Json(JsonWriter()
+                                      .Str("state", p.state)
+                                      .Str("root", p.root)
+                                      .Str("current", p.current)
+                                      .Str("error", p.error)
+                                      .Int("files", static_cast<long long>(p.files))
+                                      .Int("dirs", static_cast<long long>(p.dirs))
+                                      .Int("bytes", static_cast<long long>(p.bytes))
+                                      .Int("errors", static_cast<long long>(p.errors))
+                                      .Int("started_at", p.started_at)
+                                      .Int("finished_at", p.finished_at)
+                                      // Console clock, so the UI's elapsed time doesn't depend on the browser's.
+                                      .Int("now", static_cast<long long>(std::time(nullptr)))
+                                      .Done());
+    });
+
+    server->Route("GET", "/api/storage/scan/tree", [](const HttpRequest &req) {
+        std::string json, err;
+        int depth = std::atoi(req.Query("depth", "2").c_str());
+        int limit = std::atoi(req.Query("limit", "200").c_str());
+        if (!StorageScanTreeJson(req.Query("path"), depth, limit, &json, &err)) return HttpResponse::Error(err, 404);
+        return HttpResponse::Json(json);
+    });
+
+    server->Route("GET", "/api/storage/scan/summary", [](const HttpRequest &) {
+        std::string json, err;
+        if (!StorageScanSummaryJson(&json, &err)) return HttpResponse::Error(err, 404);
+        return HttpResponse::Json(json);
+    });
+
+    server->Route("GET", "/api/storage/scan/files", [](const HttpRequest &req) {
+        std::string json, err;
+        if (!StorageScanFilesJson(std::atoi(req.Query("limit", "100").c_str()), &json, &err)) {
+            return HttpResponse::Error(err, 404);
+        }
+        return HttpResponse::Json(json);
     });
 
     // `path` is normally the file to be written, so its parent is checked. Pass

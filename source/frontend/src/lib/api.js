@@ -394,6 +394,18 @@ export const api = {
     clear: () => request('POST', '/api/klogs/clear'),
   },
 
+  // Storage analyzer — scan() starts a background walk; poll scanStatus() until it is
+  // "done", then browse the in-memory result with tree()/summary()/files().
+  storage: {
+    scan: (path) => request('POST', '/api/storage/scan', { path }),
+    cancel: () => request('POST', '/api/storage/scan/cancel'),
+    scanStatus: () => request('GET', '/api/storage/scan/status'),
+    summary: () => request('GET', '/api/storage/scan/summary'),
+    tree: (path, depth = 2, limit = 200) =>
+      request('GET', `/api/storage/scan/tree?path=${encodeURIComponent(path)}&depth=${depth}&limit=${limit}`),
+    files: (limit = 100) => request('GET', `/api/storage/scan/files?limit=${limit}`),
+  },
+
   thermal: {
     status: () => request('GET', '/api/thermal'),
     setFan: (tempC) => request('POST', '/api/thermal/fan', { temp_c: tempC }),

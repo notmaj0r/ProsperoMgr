@@ -16,6 +16,7 @@ import LogsView from './views/LogsView.jsx'
 import AvatarView from './views/AvatarView.jsx'
 import SavesView from './views/SavesView.jsx'
 import PkgView from './views/PkgView.jsx'
+import StorageView from './views/StorageView.jsx'
 import { api } from './lib/api.js'
 import { useI18n } from './lib/i18n.jsx'
 
@@ -26,6 +27,7 @@ const VIEWS = {
   repository: RepositoryView,
   pkg: PkgView,
   saves: SavesView,
+  storage: StorageView,
   processes: ProcessesView,
   avatar: AvatarView,
   settings: SettingsView,
@@ -39,6 +41,7 @@ const TITLE_KEYS = {
   repository: 'nav.payloadRepositories',
   pkg: 'nav.installPkg',
   saves: 'nav.saveBackups',
+  storage: 'nav.storageAnalyzer',
   processes: 'nav.runningProcesses',
   avatar: 'nav.profile',
   settings: 'nav.settings',
