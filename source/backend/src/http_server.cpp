@@ -690,6 +690,8 @@ MHD_Result HttpServer::OnRequestImpl(void *cls, MHD_Connection *conn, const char
     req.body_file = state->body_file;
     req.body_size = state->body_size;
     req.received_at = state->received_at;
+    if (const char *range = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Range"))
+        req.range = range;
 
     MHD_get_connection_values(
         conn, MHD_GET_ARGUMENT_KIND,
