@@ -34,6 +34,7 @@ struct HttpRequest {
     std::string body_file;
     uint64_t body_size = 0;
     std::map<std::string, std::string> query; // ?key=value GET arguments
+    std::string range; // Optional Range request header, e.g. bytes=0-1023
     // Set when the connection was accepted, before any body bytes arrived — (now -
     // received_at) spans the receive phase. Only used by net-sink debug routes.
     std::chrono::steady_clock::time_point received_at;

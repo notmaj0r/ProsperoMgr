@@ -1,5 +1,6 @@
 #include "job_queue.hpp"
 #include "api_routes.hpp"
+#include "disc_range.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -56,7 +57,8 @@ constexpr size_t kDownloadReadChunk = 2 * 1024 * 1024;
 
 class FileReadStream final : public HttpBodyStream {
   public:
-    FileReadStream(int fd, std::shared_ptr<void> lease) : fd_(fd), lease_(std::move(lease)) {}
+    FileReadStream(int fd, std::shared_ptr<void> lease, uint64_t base, uint64_t count)
+        : fd_(fd), lease_(std::move(lease)), base_(base), count_(count) {}
     ~FileReadStream() override {
         if (fd_ >= 0) close(fd_);
 #ifdef PROSPEROMGR_DEBUG_NET
@@ -68,10 +70,12 @@ class FileReadStream final : public HttpBodyStream {
     }
 
     ssize_t Read(uint64_t position, char *buffer, size_t max_bytes) override {
-        size_t wanted = std::min(max_bytes, kDownloadReadChunk);
+        if (position >= count_) return MHD_CONTENT_READER_END_OF_STREAM;
+        size_t wanted = static_cast<size_t>(std::min<uint64_t>(
+            std::min(max_bytes, kDownloadReadChunk), count_ - position));
         ssize_t got;
         do {
-            got = pread(fd_, buffer, wanted, static_cast<off_t>(position));
+            got = pread(fd_, buffer, wanted, static_cast<off_t>(base_ + position));
         } while (got < 0 && errno == EINTR);
 
         if (got > 0) {
@@ -87,6 +91,8 @@ class FileReadStream final : public HttpBodyStream {
   private:
     int fd_ = -1;
     std::shared_ptr<void> lease_;
+    uint64_t base_ = 0;
+    uint64_t count_ = 0;
 #ifdef PROSPEROMGR_DEBUG_NET
     uint64_t bytes_read_ = 0;
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
@@ -1540,10 +1546,27 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
             return HttpResponse::Error("file does not exist or is not a regular file", 404);
         }
         int fd = open(path.c_str(), O_RDONLY);
-        // Widens the kernel read-ahead window past its small default, which
-        // is what keeps a sequential download from stalling between extents.
-        if (fd >= 0) (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
         if (fd < 0) return HttpResponse::Error("could not open file", 500);
+        // VLC may seek to moov at the END of an MP4. Preserve the HTTP Range.
+        const uint64_t total = static_cast<uint64_t>(st.st_size);
+        uint64_t start = 0, count = total;
+        const bool partial = !req.range.empty();
+        disc_range::Result range;
+        if (partial) {
+            range = disc_range::parse(req.range, total);
+            if (!range.valid) {
+                close(fd);
+                HttpResponse invalid = HttpResponse::Error("unsatisfiable byte range", 416);
+                invalid.extra_headers["Content-Range"] = "bytes */" + std::to_string(total);
+                invalid.extra_headers["Accept-Ranges"] = "bytes";
+                return invalid;
+            }
+            start = range.first;
+            count = range.last - range.first + 1;
+        }
+        // A range request is random access, not sequential read-ahead.
+        (void)posix_fadvise(fd, static_cast<off_t>(start), static_cast<off_t>(count),
+                            partial ? POSIX_FADV_RANDOM : POSIX_FADV_SEQUENTIAL);
 
         // Unlink now, with the fd already open: the stream keeps working and the
         // temp archive can't linger however the transfer ends.
@@ -1552,13 +1575,18 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
 
         std::string filename = fs::path(path).filename().string();
         HttpResponse resp;
-        resp.status = 200;
+        resp.status = partial ? 206 : 200;
         resp.content_type = GuessContentType(filename);
-        // Stream through FileReadStream rather than handing MHD the fd, so even a
-        // multi-GB file transfers with constant memory. See kDownloadReadChunk.
-        resp.body_stream_size = static_cast<uint64_t>(st.st_size);
-        resp.body_stream = std::make_shared<FileReadStream>(fd, lease);
+        // Stream only the requested extent; libmicrohttpd supplies a relative
+        // offset, FileReadStream adds the file base to the pread() call.
+        resp.body_stream_size = count;
+        resp.body_stream = std::make_shared<FileReadStream>(fd, lease, start, count);
         resp.extra_headers["Content-Disposition"] = ContentDisposition(filename);
+        resp.extra_headers["Accept-Ranges"] = "bytes";
+        if (partial)
+            resp.extra_headers["Content-Range"] = "bytes " + std::to_string(start) + "-" +
+                                                  std::to_string(range.last) + "/" +
+                                                  std::to_string(total);
         return resp;
     });
 
