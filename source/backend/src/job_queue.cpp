@@ -78,20 +78,22 @@ void InitializeJobQueue() {
     LogEvent("Job queue started (" + std::to_string(kWorkerCount) + " workers)");
 }
 
-void StartBackgroundThread(std::function<void()> fn) {
+bool StartBackgroundThread(std::function<void()> fn) {
     auto *payload = new (std::nothrow) std::function<void()>(std::move(fn));
-    if (!payload) return;
+    if (!payload) return false;
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, kThreadStack);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_t tid;
-    if (pthread_create(&tid, &attr, BackgroundEntry, payload) != 0) {
+    bool started = pthread_create(&tid, &attr, BackgroundEntry, payload) == 0;
+    if (!started) {
         LogEvent("Could not start a background thread");
         delete payload;
     }
     pthread_attr_destroy(&attr);
+    return started;
 }
 
 void RunOnWorker(std::function<void()> job) {

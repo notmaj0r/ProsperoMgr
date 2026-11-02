@@ -11,6 +11,7 @@ const DESCRIPTION_KEYS = {
   repository: 'commandPalette.descRepository',
   pkg: 'commandPalette.descPkg',
   saves: 'commandPalette.descSaves',
+  storage: 'commandPalette.descStorage',
   processes: 'commandPalette.descProcesses',
   avatar: 'commandPalette.descAvatar',
   settings: 'commandPalette.descSettings',

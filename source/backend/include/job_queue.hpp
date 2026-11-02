@@ -16,6 +16,7 @@ void RunOnWorker(std::function<void()> job);
 
 // Starts a detached thread with an explicit stack. Never use std::thread here:
 // the SDK's default stack is small enough that one frame can run off the end.
-void StartBackgroundThread(std::function<void()> fn);
+// Returns false (and logs) when the thread could not be created.
+bool StartBackgroundThread(std::function<void()> fn);
 
 } // namespace prospero

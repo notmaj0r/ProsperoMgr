@@ -56,6 +56,12 @@ export const ICONS = {
       <path d="M8 4v5h7V4M8 14h8v6H8v-6Z" strokeLinejoin="round" />
     </svg>
   ),
+  storage: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M11 4v16M11 13h10M16 13v7" strokeLinejoin="round" />
+    </svg>
+  ),
   pkg: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <path d="M12 3v11" strokeLinecap="round" />
@@ -74,6 +80,7 @@ export const NAV = [
   { id: 'pkg', labelKey: 'nav.installPkg', group: 'Main' },
   { id: 'saves', labelKey: 'nav.saveBackups', group: 'Main' },
   { id: 'repository', labelKey: 'nav.payloadRepositories', mobileLabelKey: 'nav.repositoriesShort', group: 'Tools' },
+  { id: 'storage', labelKey: 'nav.storageAnalyzer', group: 'Tools' },
   { id: 'avatar', labelKey: 'nav.profile', group: 'Tools' },
   { id: 'processes', labelKey: 'nav.runningProcesses', group: 'Advanced' },
   { id: 'logs', labelKey: 'nav.logs', group: 'Advanced' },
