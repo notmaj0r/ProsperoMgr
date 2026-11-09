@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Button from './Button.jsx'
 import { AlertTriangleIcon, InfoIcon } from './icons.jsx'
+import { useI18n } from '../lib/i18n.jsx'
 import { useDismiss } from '../lib/useDismiss.js'
 import { useDialogAccessibility } from '../lib/useDialogAccessibility.js'
 
@@ -51,12 +52,12 @@ export function Dialog({
   )
 }
 
-// The most common dialog in the app: are you sure? Replaces window.confirm everywhere.
-// `detail` is for a technical line ("Signal: SIGKILL", "PID: 1234") that doesn't lead the sentence.
+// "Are you sure?" dialog. `detail` holds a technical line such as "PID: 1234" that shouldn't lead the text.
 export function ConfirmDialog({
-  title, description, detail, confirmLabel = 'Confirm', cancelLabel = 'Cancel', tone = 'neutral', onConfirm, onClose,
+  title, description, detail, confirmLabel, cancelLabel, tone = 'neutral', onConfirm, onClose,
   children,
 }) {
+  const { t } = useI18n()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -79,23 +80,23 @@ export function ConfirmDialog({
       onClose={onClose}
       tone={tone}
       icon={tone === 'danger' || tone === 'warn' ? <AlertTriangleIcon size={19} /> : <InfoIcon size={19} />}
-      children={children}
       renderFooter={(close) => (
         <>
-          <Button tone="neutral" onClick={close} disabled={busy}>{cancelLabel}</Button>
+          <Button tone="neutral" onClick={close} disabled={busy}>{cancelLabel ?? t('common.cancel')}</Button>
           <Button
             tone={tone === 'danger' ? 'danger' : tone === 'warn' ? 'warn' : 'primary'}
             sheen={tone !== 'danger' && tone !== 'warn'}
             onClick={() => handleConfirm(close)}
             disabled={busy}
           >
-            {busy ? 'Working…' : confirmLabel}
+            {busy ? t('common.working') : (confirmLabel ?? t('common.confirm'))}
           </Button>
         </>
       )}
     >
-      {(detail || error) && (
+      {(children || detail || error) && (
         <div className="space-y-2">
+          {children}
           {detail && <div className="pmgr-mono rounded-lg border border-panel-border bg-bg/45 px-3 py-2 text-xs text-text-dim">{detail}</div>}
           {error && <div className="rounded-lg border border-err/25 bg-err/10 px-3 py-2 text-xs text-err">{error}</div>}
         </div>
@@ -107,9 +108,10 @@ export function ConfirmDialog({
 // New file/folder, rename — replaces window.prompt. Autofocuses, submits on Enter, validates
 // inline, and surfaces backend errors inline instead of a second alert.
 export function InputDialog({
-  title, description, label, defaultValue = '', placeholder, confirmLabel = 'Save', cancelLabel = 'Cancel',
+  title, description, label, defaultValue = '', placeholder, confirmLabel, cancelLabel,
   type = 'text', validate, onConfirm, onClose,
 }) {
+  const { t } = useI18n()
   const [value, setValue] = useState(defaultValue)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -138,9 +140,9 @@ export function InputDialog({
       initialFocusRef={inputRef}
       renderFooter={(close) => (
         <>
-          <Button tone="neutral" onClick={close} disabled={busy}>{cancelLabel}</Button>
+          <Button tone="neutral" onClick={close} disabled={busy}>{cancelLabel ?? t('common.cancel')}</Button>
           <Button tone="primary" sheen onClick={() => submit(close)} disabled={busy || Boolean(localError) || !value.trim()}>
-            {busy ? 'Working…' : confirmLabel}
+            {busy ? t('common.working') : (confirmLabel ?? t('common.save'))}
           </Button>
         </>
       )}

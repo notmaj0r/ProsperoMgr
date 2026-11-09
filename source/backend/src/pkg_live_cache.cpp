@@ -16,9 +16,14 @@ namespace PkgLiveCache {
 namespace {
 
 constexpr uint64_t kSeg = kPkgLiveSegSize;
-constexpr int kSlots = 64;         // 64 MB RAM ceiling per session.
+constexpr int kSlots = 240;        // 240 MB cache keeps the whole feature under 256 MB; smaller packages use less.
+// Must match TAIL_SEGS in pkgDirectUpload.js: the package tail is sent first and kept resident.
+constexpr uint64_t kTailSegs = 64;
 constexpr int kTimeoutSec = 300;   // Bound on any single blocking wait.
 constexpr int kSeekCoalesceMs = 2000;
+// The installer reads a few hundred MB at the very end first; reads there say nothing about its position.
+constexpr uint64_t kTailZoneSegs = 512;
+constexpr uint64_t kHoleSkipSegs = 64;
 
 struct Live {
     std::mutex mu;
@@ -32,6 +37,7 @@ struct Live {
 
     std::string session_id;
     std::string filename;
+    std::string title;
     uint64_t total = 0;
     uint64_t nsegs = 0;
 
@@ -39,19 +45,29 @@ struct Live {
     std::vector<int> slot_of;        // per-segment RAM slot index, -1 = absent
     std::vector<uint8_t> slots;      // nslots * kSeg bytes
     int nslots = 0;
+    std::chrono::steady_clock::time_point started;
     std::vector<uint64_t> last_use;  // per-slot LRU stamp
     std::vector<int> slot_seg;       // per-slot file segment, -1 = free
     std::vector<int> waiters;        // per-segment parked-reader count (eviction shield)
     std::vector<uint8_t> acked_ever; // per-segment stored-at-least-once (finish gate)
+    uint64_t busy_count = 0;         // segments refused for lack of a free slot
+    uint64_t wire_bytes = 0;
+    uint64_t duplicates = 0;
+    uint64_t evicted_unread = 0;
+    uint64_t seek_count = 0;         // resend requests sent to the browser, for the session log
     std::vector<uint64_t> seek_sent; // per-segment last seek-emission stamp (ms)
 
     uint64_t present_count = 0;
     uint64_t served = 0;   // bytes delivered to readers (status only)
-    uint64_t run_hi = 0;   // offset past reader's last served read (eviction HWM)
-    uint64_t peak_seg = 0; // highest segment the reader has sought (far-seek HWM)
+    uint64_t wait_us = 0;  // time readers spent blocked on missing data, summed over readers
+    std::vector<uint8_t> served_seg; // 1 once the reader has consumed a segment through its end
+    uint64_t body_hi = 0;            // first body segment the reader has not finished (holes are skipped)
+    uint64_t served_hi = 0;          // furthest finished segment outside the tail zone, +1
     uint64_t tick = 0;
 
     PkgLiveSeekFn seek_fn;
+    PkgLivePosFn pos_fn;
+    uint64_t pos_sent = 0; // last reader segment reported to the browser
     PkgLiveDoneFn done_fn;
 };
 
@@ -74,12 +90,14 @@ bool TickWait(std::unique_lock<std::mutex> &lock, std::chrono::steady_clock::tim
 void FreeLocked() {
     g_lv.present.clear();
     g_lv.slot_of.clear();
-    g_lv.slots.clear();
+    // clear() would keep the whole cache allocated; swap hands the memory back to the system.
+    std::vector<uint8_t>().swap(g_lv.slots);
     g_lv.last_use.clear();
     g_lv.slot_seg.clear();
     g_lv.waiters.clear();
     g_lv.acked_ever.clear();
     g_lv.seek_sent.clear();
+    g_lv.served_seg.clear();
     g_lv.free_pending = false;
 }
 
@@ -90,8 +108,8 @@ uint64_t SegLenLocked(uint64_t seg) {
     return left < kSeg ? left : kSeg;
 }
 
-// Frees a slot for segment `seg`, LRU among whatever's evictable right now — served-past,
-// urgently waited-on, or (once the reader has sought ahead) any acknowledged slot.
+// Frees a slot for `seg`: segments the reader already passed go first, oldest first. An unread one
+// is only taken for a segment the reader is blocked on, so it never waits on a resend.
 int AllocSlotLocked(uint64_t seg) {
     if (seg < g_lv.nsegs && g_lv.slot_of[seg] >= 0) return g_lv.slot_of[seg];
 
@@ -101,33 +119,33 @@ int AllocSlotLocked(uint64_t seg) {
     }
     if (free_slot < 0) {
         bool incoming_waited = seg < g_lv.nsegs && g_lv.waiters[seg] > 0;
-        bool far = seg >= g_lv.peak_seg;
+        int victim = -1;
         uint64_t oldest = 0;
-        int oldest_seg = -1;
-        bool first = true;
         for (uint64_t s = 1; s < g_lv.nsegs; s++) {
-            if (!g_lv.present[s] || g_lv.slot_of[s] < 0) continue;
-            if (g_lv.waiters[s] > 0) continue;
-            bool evictable = false;
-            if (g_lv.run_hi >= (s + 1) * kSeg) {
-                evictable = true; // A: served-past
-            } else if (incoming_waited && g_lv.acked_ever[s]) {
-                evictable = true; // B: urgent read
-            } else if (g_lv.peak_seg > 0 && g_lv.acked_ever[s] && (far || s != seg)) {
-                evictable = true; // C: demand page
-            }
-            if (!evictable) continue;
+            if (!g_lv.present[s] || g_lv.slot_of[s] < 0 || g_lv.waiters[s] > 0) continue;
+            if (!g_lv.served_seg[s] || s + kTailSegs >= g_lv.nsegs) continue; // unread, or the pinned tail
             uint64_t stamp = g_lv.last_use[static_cast<size_t>(g_lv.slot_of[s])];
-            if (first || stamp < oldest) {
+            if (victim < 0 || stamp < oldest) {
                 oldest = stamp;
-                oldest_seg = static_cast<int>(s);
-                first = false;
+                victim = static_cast<int>(s);
             }
         }
-        if (oldest_seg < 0) return -1;
-        free_slot = g_lv.slot_of[static_cast<size_t>(oldest_seg)];
-        g_lv.present[static_cast<size_t>(oldest_seg)] = 0;
-        g_lv.slot_of[static_cast<size_t>(oldest_seg)] = -1;
+        if (victim < 0 && incoming_waited) {
+            uint64_t farthest = 0;
+            for (uint64_t s = 1; s < g_lv.nsegs; s++) {
+                if (!g_lv.present[s] || g_lv.slot_of[s] < 0 || g_lv.waiters[s] > 0 || !g_lv.acked_ever[s]) continue;
+                uint64_t distance = s > seg ? s - seg : seg - s;
+                if (victim < 0 || distance > farthest) {
+                    farthest = distance;
+                    victim = static_cast<int>(s);
+                }
+            }
+        }
+        if (victim < 0) return -1;
+        if (!g_lv.served_seg[static_cast<size_t>(victim)]) g_lv.evicted_unread++;
+        free_slot = g_lv.slot_of[static_cast<size_t>(victim)];
+        g_lv.present[static_cast<size_t>(victim)] = 0;
+        g_lv.slot_of[static_cast<size_t>(victim)] = -1;
     }
     if (seg < g_lv.nsegs) {
         g_lv.slot_of[seg] = free_slot;
@@ -147,6 +165,7 @@ int StoreSegLocked(uint64_t seg, const void *data, uint64_t offset, size_t len) 
     if (w_end <= w_start) return 1;
     if (w_end - w_start != s_len) return -1; // only the short final segment may be partial
 
+    if (g_lv.present[seg]) g_lv.duplicates++;
     int slot = AllocSlotLocked(seg);
     if (slot < 0) return -2;
     std::memcpy(g_lv.slots.data() + static_cast<size_t>(slot) * kSeg,
@@ -185,7 +204,13 @@ int Create(const std::string &filename, uint64_t total_size, std::string *out_se
     g_lv.waiters.assign(nsegs, 0);
     g_lv.acked_ever.assign(nsegs, 0);
     g_lv.seek_sent.assign(nsegs, 0);
+    g_lv.seek_count = 0;
+    g_lv.wire_bytes = 0;
+    g_lv.duplicates = 0;
+    g_lv.evicted_unread = 0;
+    g_lv.busy_count = 0;
     g_lv.nslots = nslots;
+    g_lv.started = std::chrono::steady_clock::now();
 
     char sid[24];
     static unsigned counter = 0;
@@ -194,12 +219,16 @@ int Create(const std::string &filename, uint64_t total_size, std::string *out_se
     std::snprintf(sid, sizeof(sid), "%016llx", static_cast<unsigned long long>(seed));
     g_lv.session_id = sid;
     g_lv.filename = base;
+    g_lv.title.clear();
     g_lv.total = total_size;
     g_lv.nsegs = nsegs;
     g_lv.present_count = 0;
     g_lv.served = 0;
-    g_lv.run_hi = 0;
-    g_lv.peak_seg = 0;
+    g_lv.body_hi = 0;
+    g_lv.served_hi = 0;
+    g_lv.wait_us = 0;
+    g_lv.served_seg.assign(nsegs, 0);
+    g_lv.pos_sent = 0;
     g_lv.upload_complete = false;
     g_lv.aborted = false;
     g_lv.refs = 0;
@@ -210,6 +239,11 @@ int Create(const std::string &filename, uint64_t total_size, std::string *out_se
     LogEvent("[pkglive] session '" + g_lv.session_id + "' ready: file='" + base + "' total=" +
              std::to_string(total_size) + " segs=" + std::to_string(nsegs) + " slots=" + std::to_string(nslots));
     return 0;
+}
+
+void SetTitle(const std::string &title) {
+    std::lock_guard<std::mutex> lock(g_lv.mu);
+    if (g_lv.active) g_lv.title = title.substr(0, 120);
 }
 
 bool SessionActive() {
@@ -226,6 +260,16 @@ bool CheckId(const std::string &session_id) {
 void SetSeekFn(PkgLiveSeekFn fn) {
     std::lock_guard<std::mutex> lock(g_lv.mu);
     g_lv.seek_fn = std::move(fn);
+}
+
+void SetPosFn(PkgLivePosFn fn) {
+    std::lock_guard<std::mutex> lock(g_lv.mu);
+    g_lv.pos_fn = std::move(fn);
+}
+
+int SlotCount() {
+    std::lock_guard<std::mutex> lock(g_lv.mu);
+    return g_lv.active ? g_lv.nslots : 0;
 }
 
 void SetDoneFn(PkgLiveDoneFn fn) {
@@ -269,11 +313,13 @@ int TryWrite(uint64_t offset, const void *data, size_t len) {
 
     uint64_t first_seg = offset / kSeg;
     uint64_t last_seg = (offset + len - 1) / kSeg;
+    g_lv.wire_bytes += len;
     for (uint64_t s = first_seg; s <= last_seg; s++) {
         int r = StoreSegLocked(s, data, offset, len);
         if (r == 1) continue;
         if (r == -1) return -1;
-        if (r == -2) return -2; // earlier segs of this call (if any) stay stored, retry is idempotent
+        // Segments stored earlier in this call stay stored, so a retry is safe.
+        if (r == -2) { g_lv.busy_count++; return -2; }
     }
     g_lv.changed.notify_all();
     return 0;
@@ -293,7 +339,10 @@ int Finish() {
     for (uint8_t a : g_lv.acked_ever) acked += a;
     if (!g_lv.active || g_lv.aborted || acked != g_lv.nsegs) return -1;
     g_lv.upload_complete = true;
-    LogEvent("[pkglive] upload byte-complete: '" + g_lv.filename + "' (" + std::to_string(g_lv.total) + " bytes)");
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_lv.started).count();
+    char rate[48];
+    std::snprintf(rate, sizeof(rate), "%.1fs, %.0f MB/s", seconds, seconds > 0 ? g_lv.total / seconds / 1e6 : 0.0);
+    LogEvent("[pkglive] upload byte-complete: '" + g_lv.filename + "' (" + std::to_string(g_lv.total) + " bytes, " + rate + ")");
     g_lv.changed.notify_all();
     return 0;
 }
@@ -302,7 +351,7 @@ void Abort() {
     std::lock_guard<std::mutex> lock(g_lv.mu);
     if (g_lv.active && !g_lv.aborted) {
         g_lv.aborted = true;
-        LogEvent("[pkglive] session aborted");
+        LogEvent("[pkglive] session aborted (" + std::to_string(g_lv.seek_count) + " resend requests)");
     }
     g_lv.changed.notify_all();
 }
@@ -361,6 +410,8 @@ bool EmitSeekLocked(uint64_t seg, PkgLiveSeekFn *out_fn) {
     uint64_t now = NowMs();
     if (seg < g_lv.nsegs && now - g_lv.seek_sent[seg] > static_cast<uint64_t>(kSeekCoalesceMs)) {
         g_lv.seek_sent[seg] = now;
+        g_lv.seek_count++;
+        if (g_lv.seek_count <= 30) LogEvent("[pkglive] installer needs segment " + std::to_string(seg));
         *out_fn = g_lv.seek_fn;
         return true;
     }
@@ -379,8 +430,6 @@ long Read(uint64_t off, void *buf, size_t count) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kTimeoutSec);
     auto *dst = static_cast<uint8_t *>(buf);
     size_t got = 0;
-    uint64_t read_start = off;
-    uint64_t served_end = off + count;
 
     for (;;) {
         if (g_lv.aborted) return -1;
@@ -408,20 +457,33 @@ long Read(uint64_t off, void *buf, size_t count) {
                 if (m == 0) break;
                 std::memcpy(dst + got, g_lv.slots.data() + static_cast<size_t>(slot) * kSeg + so, m);
                 g_lv.last_use[static_cast<size_t>(slot)] = ++g_lv.tick;
+                if (so + m >= seg_left) {
+                    g_lv.served_seg[s] = 1;
+                    if (s + kTailZoneSegs < g_lv.nsegs && s + 1 > g_lv.served_hi) g_lv.served_hi = s + 1;
+                    while (g_lv.body_hi + kTailSegs < g_lv.nsegs &&
+                           (g_lv.served_seg[g_lv.body_hi] || g_lv.served_hi > g_lv.body_hi + kHoleSkipSegs)) {
+                        g_lv.body_hi++;
+                    }
+                }
                 g_lv.served += m;
                 off += m;
                 got += m;
             }
             g_lv.changed.notify_all(); // writer space freed
             if (got >= count) {
-                if (read_start <= g_lv.run_hi + kSeg && served_end > g_lv.run_hi) g_lv.run_hi = served_end;
+                uint64_t reader_seg = g_lv.body_hi;
+                if (g_lv.pos_fn && reader_seg >= g_lv.pos_sent + 1) {
+                    g_lv.pos_sent = reader_seg;
+                    PkgLivePosFn pos = g_lv.pos_fn;
+                    lock.unlock();
+                    pos(reader_seg);
+                }
                 return static_cast<long>(got);
             }
             continue; // raced teardown: rescan
         }
 
         uint64_t need_seg = miss / kSeg;
-        if (need_seg > g_lv.peak_seg && need_seg < g_lv.nsegs) g_lv.peak_seg = need_seg;
 
         PkgLiveSeekFn fn;
         bool emit = false;
@@ -442,7 +504,10 @@ long Read(uint64_t off, void *buf, size_t count) {
                 continue;
             }
         }
+        auto wait_started = std::chrono::steady_clock::now();
         bool expired = TickWait(lock, deadline);
+        g_lv.wait_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - wait_started).count());
         if (need_seg < g_lv.nsegs && g_lv.waiters[need_seg] > 0) g_lv.waiters[need_seg]--;
         if (expired) {
             LogEvent("[pkglive] read timed out at off=" + std::to_string(off));
@@ -459,9 +524,21 @@ PkgLiveStatus GetStatus() {
     if (!g_lv.active) return st;
     st.complete = g_lv.upload_complete;
     st.session_id = g_lv.session_id;
+    st.reader_seg = g_lv.body_hi;
+    for (int i = 0; i < g_lv.nslots; i++) {
+        if (g_lv.slot_seg[static_cast<size_t>(i)] >= 0) st.resident++;
+    }
+    st.busy_replies = g_lv.busy_count;
+    st.resend_requests = g_lv.seek_count;
+    st.wire_bytes = g_lv.wire_bytes;
+    st.duplicates = g_lv.duplicates;
+    st.evicted_unread = g_lv.evicted_unread;
+    st.slots = g_lv.nslots;
     st.filename = g_lv.filename;
+    st.title = g_lv.title;
     st.total = g_lv.total;
     st.served = g_lv.served;
+    st.reader_wait_us = g_lv.wait_us;
     for (uint64_t s = 0; s < g_lv.nsegs; s++)
         if (g_lv.acked_ever[s]) st.received += SegLenLocked(s);
     return st;

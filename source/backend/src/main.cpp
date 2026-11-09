@@ -27,6 +27,7 @@
 #include "klog_client.hpp"
 #include "log.hpp"
 #include "notify.hpp"
+#include "notify_text.hpp"
 #include "payload_catalog.hpp"
 #include "payload_registry.hpp"
 #include "pkg_installer.hpp"
@@ -186,8 +187,8 @@ int main() {
 
     InstallBundledPayloads(cfg.bundled_dir); // keeps ftpsrv/klogsrv in sync with this build
     ResetPkgInstallHelper(); // next install starts this build's private AppInst service
-    std::remove((cfg.bundled_dir + "/prospero-netd.elf").c_str()); // remove the retired helper from older installs
-    ResetNetworkHelper(); // kill a retired helper process if an older build left one running
+    std::remove((cfg.bundled_dir + "/prospero-netd.elf").c_str()); // Leftover from older builds.
+    ResetNetworkHelper(); // Stops that helper if it is still running.
     InstallTilePkgIfNeeded(cfg); // one-time: home-screen tile deeplinking to :7070
 
     PayloadRegistry registry(cfg);
@@ -214,9 +215,9 @@ int main() {
     std::string address = "http://" + LocalIp() + ":" + std::to_string(Config::kHttpPort);
     // Two separate toasts instead of one combined multi-line one — each is
     // its own piece of news (which build is running, where to reach it).
-    Notify(std::string("Prospero Manager v") + kVersion + " by " + kAuthor);
-    NotifyDebug("Prospero Manager: Listening on:\n" + address);
-    LogEvent(std::string("Prospero Manager v") + kVersion + " listening on " + address);
+    Notify(NotifyText(Msg::kStartup, {{"version", kVersion}, {"author", kAuthor}}));
+    NotifyDebug("Prospero Manager: " + NotifyText(Msg::kListening, {{"address", address}}));
+    LogEvent(std::string("Prospero Manager v") + kVersion + " (built " + __DATE__ + " " + __TIME__ + ") listening on " + address);
 
     // SIGCONT asks the HTTP listener to rebuild after standby.
     auto next_pkg_cleanup = std::chrono::steady_clock::now() + std::chrono::hours(1);

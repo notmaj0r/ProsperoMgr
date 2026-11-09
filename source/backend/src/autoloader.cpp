@@ -1,6 +1,8 @@
 #include "autoloader.hpp"
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -13,12 +15,62 @@
 #include "ini.hpp"
 #include "json_writer.hpp"
 #include "log.hpp"
+#include "klog_client.hpp"
 #include "notify.hpp"
+#include "notify_text.hpp"
 #include "process_manager.hpp"
 
 namespace prospero {
 
 namespace {
+
+constexpr int kMinAbortWindowSeconds = 5;
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+constexpr int kPageOpenMs = 5000; // a page that asked for the status this recently is open
+
+// The shell logs this line to the kernel log whenever the PS button is pressed.
+class PsButtonWatch {
+  public:
+    explicit PsButtonWatch(bool active) {
+        if (!active) return;
+        mark_ = KlogMark();
+        fd_ = open("/dev/klog", O_RDONLY | O_NONBLOCK);
+        LogEvent(std::string("PS button watch: /dev/klog ") + (fd_ >= 0 ? "open" : "unavailable (errno " + std::to_string(errno) + ")") +
+                 ", klogsrv " + (IsKlogsrvConnected() ? "connected" : "not connected"));
+        // Lines logged before the countdown must not count as a press.
+        char buffer[4096];
+        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (fd_ >= 0 && std::chrono::steady_clock::now() < until && read(fd_, buffer, sizeof(buffer)) > 0) {}
+    }
+    ~PsButtonWatch() {
+        if (fd_ >= 0) close(fd_);
+    }
+    PsButtonWatch(const PsButtonWatch &) = delete;
+    PsButtonWatch &operator=(const PsButtonWatch &) = delete;
+
+    bool Pressed() {
+        // klogsrv may be reading the kernel log too, and then it gets some of the lines.
+        if (KlogSeenSince(mark_, kPressLine)) return true;
+        if (fd_ < 0) return false;
+        char buffer[2048];
+        ssize_t n;
+        while ((n = read(fd_, buffer, sizeof(buffer))) > 0) {
+            recent_.append(buffer, static_cast<size_t>(n));
+            if (recent_.find(kPressLine) != std::string::npos) return true;
+            if (recent_.size() > 32) recent_.erase(0, recent_.size() - 32); // a match can span two reads
+        }
+        return false;
+    }
+
+  private:
+    static constexpr const char *kPressLine = "onPSButtonPressed";
+    int fd_ = -1;
+    uint64_t mark_ = 0;
+    std::string recent_;
+};
 std::string BundledAutostartPath(const Config &cfg) { return cfg.root_dir + "/bundled_autostart.txt"; }
 
 // ---- Same-boot session state: survives a killed+redeployed ProsperoMgr.elf but resets
@@ -270,6 +322,7 @@ void Autoloader::StartWorker(AutoloaderRunMode mode) {
 }
 
 AutoloaderStatus Autoloader::GetStatus() const {
+    last_poll_ms_ = NowMs();
     Ini ini = Ini::Load(cfg_.autoloader_ini);
 
     AutoloaderStatus s;
@@ -288,6 +341,10 @@ AutoloaderStatus Autoloader::GetStatus() const {
     return s;
 }
 
+bool Autoloader::PageOpen() const {
+    return NowMs() - last_poll_ms_ < kPageOpenMs;
+}
+
 bool Autoloader::InterruptibleSleep(int milliseconds) {
     int remaining = std::max(0, milliseconds);
     while (remaining > 0 && !abort_flag_) {
@@ -301,7 +358,8 @@ bool Autoloader::InterruptibleSleep(int milliseconds) {
 void Autoloader::Worker(AutoloaderRunMode mode) {
     bool skip_countdown = (mode == AutoloaderRunMode::ManualForce);
     AutoloaderConfig config = ReadAutoloaderConfig(cfg_);
-    int delay_seconds = std::clamp(config.delay, 0, 300);
+    // Leaves time to press the PS button before anything loads.
+    int delay_seconds = skip_countdown ? 0 : std::clamp(std::max(config.delay, kMinAbortWindowSeconds), 0, 300);
     int retries = std::clamp(config.retries, 0, 3);
     auto sequence = config.sequence;
 
@@ -361,7 +419,7 @@ void Autoloader::Worker(AutoloaderRunMode mode) {
     bool fully_loaded = required_total > 0 && already_loaded_count == required_total;
     if (fully_loaded) {
         std::string msg = "Prospero Manager: Payloads already loaded!";
-        NotifyDebug(msg);
+        NotifyDebug("Prospero Manager: " + NotifyText(Msg::kPayloadsAlreadyLoaded));
         LogEvent(msg + " (" + std::to_string(already_loaded_count) + " payload(s) skipped, autoloader sequence not re-run)");
         std::lock_guard<std::mutex> lock(current_mu_);
         current_ = "DONE";
@@ -375,13 +433,29 @@ void Autoloader::Worker(AutoloaderRunMode mode) {
     }
 
     remaining_seconds_ = skip_countdown ? 0 : delay_seconds;
+    bool counting_down = !skip_countdown && delay_seconds > 0;
+    PsButtonWatch ps_button(counting_down);
+    if (counting_down) {
+        NotifyDebug("Prospero Manager: " + NotifyText(Msg::kAutoloadCountdown, {{"seconds", std::to_string(delay_seconds)}}));
+    }
     for (int elapsed = 0; !skip_countdown && elapsed < delay_seconds; elapsed++) {
         if (abort_flag_) {
             remaining_seconds_ = -1;
             return;
         }
-        if (!InterruptibleSleep(1000)) {
+        bool pressed = false;
+        for (int slice = 0; slice < 10 && !pressed; slice++) {
+            if (!InterruptibleSleep(100)) {
+                remaining_seconds_ = -1;
+                return;
+            }
+            pressed = ps_button.Pressed();
+        }
+        if (pressed) {
+            abort_flag_ = true;
             remaining_seconds_ = -1;
+            LogEvent("Autoloader aborted with the PS button");
+            NotifyDebug("Prospero Manager: " + NotifyText(Msg::kAutoloadAborted));
             return;
         }
         remaining_seconds_ = delay_seconds - elapsed - 1;
@@ -414,7 +488,7 @@ void Autoloader::Worker(AutoloaderRunMode mode) {
         std::string conflict = kstuff_count > 1
                                    ? "autoloader stopped: multiple kstuff payloads conflict"
                                    : "autoloader stopped: etaHEN and standalone kstuff conflict";
-        NotifyDebug("Prospero Manager: " + conflict);
+        NotifyDebug("Prospero Manager: " + NotifyText(kstuff_count > 1 ? Msg::kConflictKstuff : Msg::kConflictEtahen));
         LogEvent(conflict);
         std::lock_guard<std::mutex> lock(current_mu_);
         current_ = "ERROR";
@@ -429,11 +503,13 @@ void Autoloader::Worker(AutoloaderRunMode mode) {
     if (already_loaded_count > 0) {
         std::string msg = "Prospero Manager: Auto-Loading (" + std::to_string(launching_count) +
                            ") Payloads — " + std::to_string(already_loaded_count) + " already loaded";
-        NotifyDebug(msg);
+        if (!PageOpen()) { // the page already shows the progress
+            NotifyDebug("Prospero Manager: " + NotifyText(Msg::kAutoLoadingSkipping, {{"count", std::to_string(launching_count)}, {"loaded", std::to_string(already_loaded_count)}}));
+        }
         LogEvent(msg);
     } else if (total_ > 0) {
         std::string msg = "Prospero Manager: Auto-Loading (" + std::to_string(total_) + ") Payloads";
-        NotifyDebug(msg);
+        if (!PageOpen()) NotifyDebug("Prospero Manager: " + NotifyText(Msg::kAutoLoading, {{"count", std::to_string(total_.load())}}));
         LogEvent(msg);
     }
 
@@ -531,7 +607,7 @@ void Autoloader::Worker(AutoloaderRunMode mode) {
     // Pairs with the "Auto-Loading (N) Payloads" toast above. Silent on partial failure —
     // LogEvent already has the per-payload detail, and "Loaded all" would be false there.
     if (!abort_flag_ && launching_count > 0 && failed_ == 0) {
-        NotifyDebug("Prospero Manager: Loaded all (" + std::to_string(launching_count) + ") Payloads!");
+        if (!PageOpen()) NotifyDebug("Prospero Manager: " + NotifyText(Msg::kLoadedAll, {{"count", std::to_string(launching_count)}}));
     }
 
     {

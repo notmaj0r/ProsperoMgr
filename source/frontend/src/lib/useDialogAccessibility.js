@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { pushBackLayer } from './backLayer.js'
 
 const FOCUSABLE = 'a[href], button:not(:disabled), textarea:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
 const stack = []
@@ -12,6 +13,7 @@ export function useDialogAccessibility(onEscape, initialFocusRef) {
     const token = {}
     const trigger = document.activeElement
     stack.push(token)
+    const releaseBack = pushBackLayer(() => escapeRef.current?.())
 
     const frame = window.requestAnimationFrame(() => {
       if (stack[stack.length - 1] !== token) return
@@ -51,6 +53,7 @@ export function useDialogAccessibility(onEscape, initialFocusRef) {
     return () => {
       window.cancelAnimationFrame(frame)
       document.removeEventListener('keydown', onKeyDown)
+      releaseBack()
       const index = stack.lastIndexOf(token)
       if (index >= 0) stack.splice(index, 1)
       if (trigger && typeof trigger.focus === 'function' && document.contains(trigger)) trigger.focus()

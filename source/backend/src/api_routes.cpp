@@ -1,8 +1,10 @@
 #include "job_queue.hpp"
 #include "api_routes.hpp"
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -18,11 +20,13 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include "accounts.hpp"
 #include "assets.hpp"
 #include "avatar.hpp"
+#include "read_ahead.hpp"
 #include "elfldr_client.hpp"
 #include "file_jobs.hpp"
 #include "file_manager.hpp"
@@ -32,13 +36,22 @@
 #include "log.hpp"
 #include "payload_catalog.hpp"
 #include "pkg_installer.hpp"
+#include "media.hpp"
+#include "usb_eject.hpp"
+#include "pkg_live_cache.hpp"
 #include "pkg_ws_upload.hpp"
+#include "ps5_services.hpp"
 #include "process_manager.hpp"
 #include "repository.hpp"
 #include "savedata.hpp"
+#include "self_update.hpp"
+#include "hw_info.hpp"
+#include "self_download.hpp"
+#include "thermal_history.hpp"
 #include "shadowmount.hpp"
 #include "system_info.hpp"
 #include "thermal.hpp"
+#include "exfat_image.hpp"
 #include "titles.hpp"
 
 namespace fs = std::filesystem;
@@ -53,11 +66,17 @@ constexpr uint64_t kGiB = 1024ull * kMiB;
 // PS5's FreeBSD kernel returns EAGAIN with zero bytes under sendfile() on PFS/exFAT, and
 // MHD's fd-backed response path has no retry for that. Reading via pread() chunks avoids it.
 constexpr size_t kDownloadReadChunk = 2 * 1024 * 1024;
+// Smaller files read fast enough without help.
+constexpr uint64_t kReadAheadMinBytes = 256 * kMiB;
 
 class FileReadStream final : public HttpBodyStream {
   public:
-    FileReadStream(int fd, std::shared_ptr<void> lease) : fd_(fd), lease_(std::move(lease)) {}
+    // A big file gets its read-ahead here; size 0 reads directly.
+    FileReadStream(int fd, std::shared_ptr<void> lease, uint64_t size = 0) : fd_(fd), lease_(std::move(lease)) {
+        if (size >= kReadAheadMinBytes) ahead_ = ReadAhead::Start(fd_, size);
+    }
     ~FileReadStream() override {
+        ahead_.reset(); // its thread reads from fd_, so it goes first
         if (fd_ >= 0) close(fd_);
 #ifdef PROSPEROMGR_DEBUG_NET
         double elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count();
@@ -70,6 +89,13 @@ class FileReadStream final : public HttpBodyStream {
     ssize_t Read(uint64_t position, char *buffer, size_t max_bytes) override {
         size_t wanted = std::min(max_bytes, kDownloadReadChunk);
         ssize_t got;
+        if (ahead_ && ahead_->Read(position, buffer, wanted, &got)) {
+#ifdef PROSPEROMGR_DEBUG_NET
+            if (got > 0) bytes_read_ += static_cast<uint64_t>(got);
+#endif
+            if (got > 0) return got;
+            return got == 0 ? MHD_CONTENT_READER_END_OF_STREAM : MHD_CONTENT_READER_END_WITH_ERROR;
+        }
         do {
             got = pread(fd_, buffer, wanted, static_cast<off_t>(position));
         } while (got < 0 && errno == EINTR);
@@ -87,6 +113,7 @@ class FileReadStream final : public HttpBodyStream {
   private:
     int fd_ = -1;
     std::shared_ptr<void> lease_;
+    std::unique_ptr<ReadAhead> ahead_;
 #ifdef PROSPEROMGR_DEBUG_NET
     uint64_t bytes_read_ = 0;
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
@@ -310,7 +337,7 @@ std::string AccountSlotToJson(const AccountSlot &a) {
         .Str("id_hex", a.id_hex)
         .Str("type", a.type)
         .Int("flags", a.flags)
-        .Bool("activated", a.flags != 0 && a.id_hex != "0x0")
+        .Bool("activated", a.flags != 0 && a.id_hex != "0x0000000000000000")
         .Bool("is_foreground", a.is_foreground)
         .Bool("has_backup", a.has_backup)
         .Done();
@@ -325,6 +352,10 @@ std::string SaveEntryToJson(const SaveEntry &s, const std::string &title_name, c
         .Str("title_name", title_name)
         .Str("platform", platform)
         .Bool("has_save_icon", !s.icon_path.empty())
+        .Str("save_title", s.save_title)
+        .Str("save_subtitle", s.save_subtitle)
+        .Str("save_detail", s.save_detail)
+        .Str("account_id", s.account_id)
         .Str("filename", s.filename)
         .Int("size_bytes", s.size_bytes)
         .Bool("is_ps4", s.is_ps4)
@@ -336,6 +367,7 @@ std::string TitleToJson(const TitleInfo &t) {
         .Str("title_id", t.title_id)
         .Str("name", t.name)
         .Str("platform", t.platform)
+        .Str("kind", t.kind)
         .Bool("has_icon", !t.icon_path.empty())
         .Int("played_seconds", t.played_seconds)
         .Str("last_played", t.last_played)
@@ -358,6 +390,82 @@ std::string GuessContentType(const std::string &filename) {
 }
 
 } // namespace
+
+// The state manager's turn-off is a real power-off; the kernel call is the fallback.
+static int PowerOffConsole() {
+    void *turnOff = dlsym(RTLD_DEFAULT, "sceSystemStateMgrTurnOff");
+    if (!turnOff) {
+        LogEvent("sceSystemStateMgrTurnOff not found");
+        return -1;
+    }
+    return reinterpret_cast<int (*)(int)>(turnOff)(0);
+}
+static int EnterStandby() { return sceSystemStateMgrEnterStandby(0); }
+
+static int (*PowerRequestFor(const std::string &action))(void) {
+    return action == "reboot" ? sceSystemServiceRequestReboot
+         : action == "standby" ? EnterStandby
+         : action == "shutdown" ? PowerOffConsole
+                                : nullptr;
+}
+
+// Delayed so the HTTP reply reaches the browser before the console goes down.
+static void RunPowerAction(const std::string &action) {
+    auto request = PowerRequestFor(action);
+    LogEvent("Power action requested: " + action);
+    StartBackgroundThread([request, action]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        char rc[32];
+        std::snprintf(rc, sizeof(rc), "0x%x", static_cast<unsigned>(request()));
+        LogEvent("Power " + action + " returned " + rc);
+    });
+}
+
+struct PowerSchedule {
+    std::mutex mu;
+    bool active = false;
+    bool when_idle = false;
+    std::string action;
+    std::chrono::steady_clock::time_point at;
+};
+static PowerSchedule g_power_schedule;
+
+static std::string PowerScheduleJson() {
+    std::lock_guard<std::mutex> lock(g_power_schedule.mu);
+    long long left = 0;
+    if (g_power_schedule.active && !g_power_schedule.when_idle) {
+        left = std::chrono::duration_cast<std::chrono::seconds>(g_power_schedule.at - std::chrono::steady_clock::now()).count();
+    }
+    return JsonWriter()
+        .Bool("active", g_power_schedule.active)
+        .Str("action", g_power_schedule.action)
+        .Str("mode", g_power_schedule.when_idle ? "idle" : "timer")
+        .Int("seconds_left", left > 0 ? left : 0)
+        .Done();
+}
+
+static bool ConsoleBusy() { return FileJobsActive() || FileMutationInProgress() || PkgInstallBusy(); }
+
+// Idle mode waits for a quiet stretch so the gap between two queued jobs doesn't trigger it.
+static void PowerScheduleLoop() {
+    constexpr int kIdleSecondsNeeded = 10;
+    int idle_seconds = 0;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        idle_seconds = ConsoleBusy() ? 0 : idle_seconds + 1;
+        std::string fire;
+        {
+            std::lock_guard<std::mutex> lock(g_power_schedule.mu);
+            if (!g_power_schedule.active) continue;
+            bool due = g_power_schedule.when_idle ? idle_seconds >= kIdleSecondsNeeded
+                                                  : std::chrono::steady_clock::now() >= g_power_schedule.at;
+            if (!due) continue;
+            fire = g_power_schedule.action;
+            g_power_schedule.active = false;
+        }
+        RunPowerAction(fire);
+    }
+}
 
 void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *registry,
                         Autoloader *autoloader) {
@@ -452,6 +560,8 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
                                       .Raw("autoloader", autoloader_json)
                                       .Raw("save_job", save_json)
                                       .Raw("files", JsonWriter::Array(file_jobs))
+                                      .Bool("files_paused", FileJobsPaused())
+                                      .Raw("power_schedule", PowerScheduleJson())
                                       .Done());
     });
 
@@ -497,6 +607,8 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
                                       .Str("user_name", info.user_name)
                                       .Str("user_id", info.user_id)
                                       .Raw("storage", JsonWriter::Array(storage))
+                                      .Int("ram_total", static_cast<long long>(info.ram_total_bytes))
+                                      .Int("ram_free", static_cast<long long>(info.ram_free_bytes))
                                       .Done());
     });
 
@@ -553,12 +665,48 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
 
     server->Route("GET", "/api/titles", [cfg](const HttpRequest &) {
         std::vector<std::string> items;
-        for (const auto &t : ListTitles(cfg)) items.push_back(TitleToJson(t));
+        for (const auto &t : ListTitles(cfg, true)) items.push_back(TitleToJson(t));
         return HttpResponse::Json(JsonWriter().Raw("titles", JsonWriter::Array(items)).Done());
+    });
+
+    server->Route("GET", "/api/titles/size", [](const HttpRequest &req) {
+        uint64_t size = 0;
+        if (!TitleInstallSize(req.Query("id"), &size)) return HttpResponse::Error("size unavailable", 404);
+        return HttpResponse::Json(JsonWriter().Int("size", static_cast<long long>(size)).Done());
     });
 
     // Separate from /api/titles so the Home page can poll "what's running"
     // often without re-running the app.db query every time.
+    server->Route("POST", "/api/titles/close", [](const HttpRequest &) {
+        std::string title = GetRunningTitleId();
+        std::string err;
+        if (!CloseRunningTitle(&err)) return HttpResponse::Error(err, 409);
+        LogEvent("Closed running game " + title);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Str("title_id", title).Done());
+    });
+
+    server->Route("POST", "/api/titles/uninstall", [cfg](const HttpRequest &req) {
+        std::string title_id = JsonExtractString(req.body, "title_id");
+        if (title_id.empty()) return HttpResponse::Error("missing 'title_id'");
+
+        bool installed = false;
+        for (const auto &title : ListTitles(cfg, true)) installed = installed || title.title_id == title_id;
+        if (!installed) return HttpResponse::Error("that title is not installed", 404);
+        if (GetRunningTitleId() == title_id) return HttpResponse::Error("close the game before uninstalling it", 409);
+        if (PkgInstallBusy() || FileJobsActive()) {
+            return HttpResponse::Error("wait for the running install or file operation to finish", 409);
+        }
+
+        std::string err;
+        if (!UninstallTitle(cfg, title_id, &err)) {
+            std::string detail = DescribeTitleRemoval(title_id);
+            LogEvent("Uninstall refused for " + title_id + (detail.empty() ? "" : " (" + detail + ")"));
+            return HttpResponse::Error(detail.empty() ? err : err + " [" + detail + "]", 500);
+        }
+        LogEvent("Uninstall requested for " + title_id);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Str("title_id", title_id).Done());
+    });
+
     server->Route("GET", "/api/titles/running", [](const HttpRequest &) {
         return HttpResponse::Json(JsonWriter().Str("title_id", GetRunningTitleId()).Done());
     });
@@ -570,14 +718,46 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         std::string path = TitleIconPath(title_id);
         if (path.empty()) return HttpResponse::Error("no icon for that title", 404);
 
-        std::ifstream in(path, std::ios::binary);
-        std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (data.empty()) return HttpResponse::Error("could not read icon", 500);
-
+        // Streamed from disk and cached by the browser, so the library does not refetch every cover on each visit.
         HttpResponse resp;
         resp.status = 200;
         resp.content_type = "image/png";
-        resp.body = std::move(data);
+        resp.body_file = path;
+        resp.extra_headers["Cache-Control"] = "private, max-age=3600";
+        return resp;
+    });
+
+    // Names and covers for game folders in the file manager (PPSA01234, PPSA01234-app0, ...).
+    server->Route("POST", "/api/games/identify", [](const HttpRequest &req) {
+        std::vector<std::string> rows;
+        for (const std::string &dir : JsonExtractStringArray(req.body, "paths")) {
+            if (dir.empty() || dir[0] != '/' || dir.find("..") != std::string::npos) continue;
+            GameFolderInfo info;
+            if (!IdentifyGameFolder(dir, &info)) continue;
+            rows.push_back(JsonWriter()
+                               .Str("path", dir)
+                               .Str("title_id", info.title_id)
+                               .Str("name", info.name)
+                               .Bool("own_icon", info.own_icon)
+                               .Bool("has_icon", info.in_image || !info.icon_path.empty())
+                               .Done());
+        }
+        return HttpResponse::Json(JsonWriter().Raw("games", JsonWriter::Array(rows)).Done());
+    });
+
+    server->Route("GET", "/api/games/folder-icon", [](const HttpRequest &req) {
+        std::string dir = req.Query("path");
+        if (dir.empty() || dir[0] != '/' || dir.find("..") != std::string::npos) return HttpResponse::Error("invalid path");
+        GameFolderInfo info;
+        if (!IdentifyGameFolder(dir, &info) || !info.own_icon) return HttpResponse::Error("no icon", 404);
+        HttpResponse resp;
+        resp.content_type = "image/png";
+        if (info.in_image) {
+            if (!ReadExfatFile(dir, "sce_sys/icon0.png", 8 * 1024 * 1024, &resp.body)) return HttpResponse::Error("no icon", 404);
+        } else {
+            resp.body_file = info.icon_path;
+        }
+        resp.extra_headers["Cache-Control"] = "private, max-age=3600";
         return resp;
     });
 
@@ -586,8 +766,9 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         if (title_id.empty()) return HttpResponse::Error("missing 'title_id'");
 
         std::string err;
-        if (!LaunchTitle(title_id, &err)) return HttpResponse::Error(err, 500);
-        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+        bool via_notification = false;
+        if (!LaunchTitle(title_id, &err, &via_notification)) return HttpResponse::Error(err, 500);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Bool("via_notification", via_notification).Done());
     });
 
     // ---- Avatar changer (upload -> DDS build -> apply to profile cache) ------
@@ -667,6 +848,23 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
 
     // ---- Thermal (temps + fan threshold, see thermal.hpp) -------------------
 
+    RegisterMediaRoutes(server, cfg);
+    RegisterUsbRoutes(server);
+
+    StartThermalHistory();
+    server->Route("GET", "/api/thermal/history", [](const HttpRequest &) {
+        std::vector<std::string> items;
+        for (const auto &sample : GetThermalHistory()) {
+            items.push_back(JsonWriter()
+                                .Int("t", sample.time)
+                                .Int("cpu", sample.cpu_c)
+                                .Int("soc", sample.soc_c)
+                                .Int("hottest", sample.hottest_c)
+                                .Done());
+        }
+        return HttpResponse::Json(JsonWriter().Raw("samples", JsonWriter::Array(items)).Done());
+    });
+
     server->Route("GET", "/api/thermal", [](const HttpRequest &) {
         ThermalInfo t = GetThermalInfo();
         return HttpResponse::Json(JsonWriter()
@@ -683,6 +881,26 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
                                        .Int("warm_c", t.warm_c)
                                        .Int("hot_c", t.hot_c)
                                        .Done());
+    });
+
+    server->Route("GET", "/api/hwinfo", [](const HttpRequest &) {
+        HwInfo hw = ReadHwInfo();
+        auto list = [](const std::vector<int> &values) {
+            std::string out = "[";
+            for (size_t i = 0; i < values.size(); i++) out += (i ? "," : "") + std::to_string(values[i]);
+            return out + "]";
+        };
+        return HttpResponse::Json(JsonWriter()
+                                      .Int("cpu_mhz", hw.cpu_mhz)
+                                      .Raw("core_mhz", list(hw.core_mhz))
+                                      .Int("gpu_mhz", hw.gpu_mhz)
+                                      .Int("memory_mhz", hw.memory_mhz)
+                                      .Int("fabric_mhz", hw.fabric_mhz)
+                                      .Int("load_percent", hw.load_percent)
+                                      .Raw("cpu_load_percent", list(hw.cpu_load_percent))
+                                      .Int("ram_total_mb", hw.ram_total_mb)
+                                      .Int("ram_used_mb", hw.ram_used_mb)
+                                      .Done());
     });
 
     server->Route("POST", "/api/thermal/fan", [cfg](const HttpRequest &req) {
@@ -747,14 +965,11 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         if (path.empty()) path = TitleIconPath(title_id);
         if (path.empty()) return HttpResponse::Error("no icon for that save", 404);
 
-        std::ifstream in(path, std::ios::binary);
-        std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (data.empty()) return HttpResponse::Error("could not read save icon", 500);
-
         HttpResponse resp;
         resp.status = 200;
         resp.content_type = "image/png";
-        resp.body = std::move(data);
+        resp.body_file = path;
+        resp.extra_headers["Cache-Control"] = "private, max-age=3600";
         return resp;
     });
 
@@ -814,7 +1029,8 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         if (user_hex.empty() || title_id.empty()) return HttpResponse::Error("missing 'user_id_hex'/'title_id'");
 
         std::string err, code;
-        if (!DeleteTitleSaves(cfg, user_hex, title_id, &err, &code)) {
+        bool backup_first = JsonExtractString(req.body, "backup") != "false";
+        if (!DeleteTitleSaves(cfg, user_hex, title_id, backup_first, &err, &code)) {
             return HttpResponse::CodedError(code, err, 409);
         }
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
@@ -824,10 +1040,34 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
 
     server->Route("GET", "/api/saves/backup-config", [cfg](const HttpRequest &) {
         SaveBackupConfig c = GetSaveBackupConfig(cfg);
+        std::vector<std::string> destinations;
+        for (const auto &d : GetSaveBackupDestinations(cfg)) {
+            destinations.push_back(JsonWriter()
+                                       .Str("path", d.path)
+                                       .Str("state", d.state)
+                                       .Str("message", d.message)
+                                       .Int("total_bytes", static_cast<long long>(d.total_bytes))
+                                       .Int("free_bytes", static_cast<long long>(d.free_bytes))
+                                       .Done());
+        }
+        // USB drives the user can pick from; the Saves tab adds a folder name after the mount point.
+        std::vector<std::string> devices;
+        for (const auto &v : ListStorageVolumes()) {
+            if (v.kind != "usb" && v.kind != "ext_usb") continue;
+            devices.push_back(JsonWriter()
+                                  .Str("label", v.label)
+                                  .Str("kind", v.kind)
+                                  .Int("index", v.index)
+                                  .Str("path", v.path)
+                                  .Int("total_bytes", static_cast<long long>(v.total_bytes))
+                                  .Int("free_bytes", static_cast<long long>(v.free_bytes))
+                                  .Done());
+        }
         return HttpResponse::Json(JsonWriter()
                                        .Bool("enabled", c.enabled)
                                        .Int("settle_seconds", c.settle_seconds)
-                                       .Str("backup_root", c.backup_root)
+                                       .Raw("destinations", JsonWriter::Array(destinations))
+                                       .Raw("devices", JsonWriter::Array(devices))
                                        .Done());
     });
 
@@ -835,9 +1075,9 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         SaveBackupConfig c;
         c.enabled = JsonExtractBool(req.body, "enabled", false);
         c.settle_seconds = JsonExtractInt(req.body, "settle_seconds", 15);
-        c.backup_root = JsonExtractString(req.body, "backup_root");
+        c.destinations = JsonExtractStringArray(req.body, "destinations");
         std::string err;
-        if (!SetSaveBackupConfig(cfg, c, &err)) return HttpResponse::Error(err, 500);
+        if (!SetSaveBackupConfig(cfg, c, &err)) return HttpResponse::Error(err, 400);
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
@@ -850,6 +1090,7 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
                                 .Str("platform", b.platform)
                                 .Str("filename", b.filename)
                                 .Str("path", b.path)
+                                .Str("destination", b.destination)
                                 .Int("size_bytes", static_cast<long long>(b.size_bytes))
                                 .Int("created_unix", static_cast<long long>(b.created_unix))
                                 .Done());
@@ -860,9 +1101,20 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
     server->Route("POST", "/api/saves/backup-now", [cfg](const HttpRequest &req) {
         std::string title_id = JsonExtractString(req.body, "title_id");
         if (title_id.empty()) return HttpResponse::Error("missing 'title_id'");
-        std::string err;
-        if (!BackupTitleSaves(cfg, title_id, &err)) return HttpResponse::Error(err, 500);
-        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+        std::vector<SaveBackupResult> results = BackupTitleSavesEach(cfg, title_id);
+        bool all_ok = !results.empty();
+        std::vector<std::string> items;
+        for (const auto &r : results) {
+            all_ok = all_ok && r.ok;
+            items.push_back(JsonWriter()
+                                .Str("destination", r.destination)
+                                .Bool("ok", r.ok)
+                                .Str("code", r.code)
+                                .Str("error", r.error)
+                                .Done());
+        }
+        // Per-drive outcome either way; "ok" is only true when every drive got its copy.
+        return HttpResponse::Json(JsonWriter().Bool("ok", all_ok).Raw("results", JsonWriter::Array(items)).Done());
     });
 
     server->Route("POST", "/api/saves/backup-all", [cfg](const HttpRequest &) {
@@ -885,10 +1137,19 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
     server->Route("GET", "/api/saves/backups/download", [cfg](const HttpRequest &req) {
         std::string path = req.Query("path");
         if (!IsSaveBackupPath(cfg, path)) return HttpResponse::Error("backup not found", 404);
+        auto lease = std::make_shared<FileReadLease>(path);
+        if (!*lease) return HttpResponse::Error(lease->Error(), 409);
+        int fd = open(path.c_str(), O_RDONLY);
+        struct stat st {};
+        if (fd < 0 || fstat(fd, &st) != 0) {
+            if (fd >= 0) close(fd);
+            return HttpResponse::Error("could not open backup", 500);
+        }
         HttpResponse resp;
         resp.status = 200;
         resp.content_type = "application/zip";
-        resp.body_file = path;
+        resp.body_stream_size = static_cast<uint64_t>(st.st_size);
+        resp.body_stream = std::make_shared<FileReadStream>(fd, lease, static_cast<uint64_t>(st.st_size));
         resp.extra_headers["Content-Disposition"] = "attachment; filename=\"" + fs::path(path).filename().string() + "\"";
         return resp;
     });
@@ -910,6 +1171,8 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
     server->Route("POST", "/api/saves/backups/delete", [cfg](const HttpRequest &req) {
         std::string path = JsonExtractString(req.body, "path");
         if (!IsSaveBackupPath(cfg, path)) return HttpResponse::Error("backup not found", 404);
+        FileReadLease lease(path);
+        if (!lease) return HttpResponse::Error(lease.Error(), 409);
         std::error_code ec;
         fs::remove(path, ec);
         if (ec) return HttpResponse::Error("could not delete backup: " + ec.message(), 500);
@@ -924,6 +1187,134 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
     // A PC->PS5 install streams over its own WebSocket port (pkg_ws_upload.hpp), not
     // through this server — started here since cfg is on hand for the job it kicks off.
     StartPkgWsUpload(cfg);
+
+    server->Route("POST", "/api/power", [](const HttpRequest &req) {
+        std::string action = JsonExtractString(req.body, "action");
+        if (!PowerRequestFor(action)) return HttpResponse::Error("action must be reboot, standby or shutdown");
+        RunPowerAction(action);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Str("action", action).Done());
+    });
+
+    server->Route("GET", "/api/power/schedule", [](const HttpRequest &) {
+        return HttpResponse::Json(PowerScheduleJson());
+    });
+
+    server->Route("POST", "/api/power/schedule", [](const HttpRequest &req) {
+        std::string action = JsonExtractString(req.body, "action");
+        std::string mode = JsonExtractString(req.body, "mode");
+        int minutes = JsonExtractInt(req.body, "minutes", 0);
+        if (!PowerRequestFor(action)) return HttpResponse::Error("action must be reboot, standby or shutdown");
+        if (mode != "idle" && (mode != "timer" || minutes < 1 || minutes > 24 * 60)) {
+            return HttpResponse::Error("mode must be idle, or timer with 1-1440 minutes");
+        }
+        static std::once_flag started;
+        std::call_once(started, []() { StartBackgroundThread(PowerScheduleLoop); });
+        {
+            std::lock_guard<std::mutex> lock(g_power_schedule.mu);
+            g_power_schedule.active = true;
+            g_power_schedule.when_idle = mode == "idle";
+            g_power_schedule.action = action;
+            g_power_schedule.at = std::chrono::steady_clock::now() + std::chrono::minutes(minutes);
+        }
+        LogEvent("Power schedule set: " + action + (mode == "idle" ? " when jobs finish" : " in " + std::to_string(minutes) + " min"));
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    server->Route("POST", "/api/power/schedule/cancel", [](const HttpRequest &) {
+        std::lock_guard<std::mutex> lock(g_power_schedule.mu);
+        g_power_schedule.active = false;
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    InitializeSelfUpdate(cfg, ConsoleBusy);
+
+    server->Route("GET", "/api/update", [](const HttpRequest &) {
+        UpdateStatus u = GetUpdateStatus();
+        return HttpResponse::Json(JsonWriter()
+                                      .Str("current", u.current)
+                                      .Str("latest", u.latest)
+                                      .Str("notes", u.notes)
+                                      .Str("state", u.state)
+                                      .Str("error", u.error)
+                                      .Bool("available", u.available)
+                                      .Bool("auto_update", u.auto_update)
+                                      .Int("loaded", u.loaded)
+                                      .Int("total", u.total)
+                                      .Done());
+    });
+
+    server->Route("POST", "/api/update/check", [](const HttpRequest &) {
+        CheckForUpdateAsync();
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    server->Route("POST", "/api/update/apply", [](const HttpRequest &) {
+        std::string err;
+        if (!StartUpdateInstall(&err)) return HttpResponse::Error(err, 409);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    server->Route("POST", "/api/update/auto", [](const HttpRequest &req) {
+        SetAutoUpdate(JsonExtractBool(req.body, "enabled", true));
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    // Read-only look inside a package already on the console, for the pre-install review card.
+    server->Route("GET", "/api/pkg/info", [](const HttpRequest &req) {
+        std::string path = req.Query("path");
+        if (path.empty() || path.front() != '/') return HttpResponse::Error("missing or invalid 'path'");
+        struct stat st {};
+        if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return HttpResponse::Error("file not found", 404);
+        PkgMetadata meta = ReadPkgMetadata(path);
+        if (meta.content_id.empty()) meta.content_id = ReadPkgContentId(path);
+        return HttpResponse::Json(JsonWriter()
+                                      .Int("size", static_cast<long long>(st.st_size))
+                                      .Str("content_id", meta.content_id)
+                                      .Str("title_id", meta.title_id)
+                                      .Str("title_name", meta.title_name)
+                                      .Str("version", meta.version)
+                                      .Str("category", meta.category)
+                                      .Done());
+    });
+
+    // Cover art read by the browser, kept for the live upload that is about to start.
+    server->Route("POST", "/api/pkg/cover", [](const HttpRequest &req) {
+        std::string note = req.Query("note");
+        if (!note.empty()) LogEvent("Package header seen by the browser: " + note.substr(0, 400));
+        StagePkgCover(req.body);
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    // The cover art stored inside a package already on the console.
+    server->Route("GET", "/api/pkg/icon", [](const HttpRequest &req) {
+        std::string path = req.Query("path");
+        if (path.empty() || path.front() != '/') return HttpResponse::Error("missing or invalid 'path'");
+        PkgMetadata meta = ReadPkgMetadata(path);
+        if (meta.icon_size == 0) return HttpResponse::Error("no icon in that package", 404);
+        std::ifstream in(path, std::ios::binary);
+        std::string data(meta.icon_size, '\0');
+        in.seekg(meta.icon_offset);
+        in.read(data.data(), static_cast<std::streamsize>(data.size()));
+        if (static_cast<uint32_t>(in.gcount()) != meta.icon_size || data.compare(0, 8, "\x89PNG\r\n\x1a\n") != 0) {
+            return HttpResponse::Error("could not read icon", 404);
+        }
+        HttpResponse resp;
+        resp.status = 200;
+        resp.content_type = "image/png";
+        resp.body = std::move(data);
+        return resp;
+    });
+
+    // Whether a package's game is already on the console, so the review card can warn first.
+    server->Route("GET", "/api/pkg/installed", [](const HttpRequest &req) {
+        InstalledTitle found = FindInstalledTitle(req.Query("title_id"));
+        return HttpResponse::Json(JsonWriter().Bool("installed", found.installed).Str("version", found.version).Done());
+    });
+
+    server->Route("POST", "/api/pkg/cancel", [](const HttpRequest &) {
+        CancelPkgInstall();
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
 
     server->Route("POST", "/api/pkg/install", [cfg](const HttpRequest &req) {
         std::string path = JsonExtractString(req.body, "path");
@@ -1148,7 +1539,14 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         if (!*lease) return HttpResponse::Error(lease->Error(), 409);
         std::string err;
         std::vector<FileManagerEntry> entries;
-        if (!ListNativeDirectory(path, &entries, &err)) return HttpResponse::Error(err, 500);
+        if (!ListNativeDirectory(path, &entries, &err)) {
+            // The console, not Prospero, refuses some system folders; say so instead of a bare errno.
+            if (err.find("Permission denied") != std::string::npos || err.find("Operation not permitted") != std::string::npos) {
+                err = "the console does not allow payloads to open this folder";
+                if (!IsPrivileged()) err += " (Prospero is running without full privileges: reload it after the jailbreak)";
+            }
+            return HttpResponse::Error(err, 500);
+        }
 
         std::vector<std::string> items;
         for (const auto &e : entries) items.push_back(FileEntryToJson(e));
@@ -1222,6 +1620,24 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
+    server->Route("POST", "/api/ftp/mkdirs", [](const HttpRequest &req) {
+        std::vector<std::string> paths = JsonExtractStringArray(req.body, "paths");
+        if (paths.empty()) return HttpResponse::Error("missing 'paths'");
+
+        std::string err;
+        ImmediateFileMutationGuard mutation(&err);
+        if (!mutation) return HttpResponse::Error(err, 409);
+        for (const auto &path : paths) {
+            if (!CreateNativeDirectory(path, &err)) return HttpResponse::Error(err, 500);
+        }
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    server->Route("POST", "/api/ftp/sync", [](const HttpRequest &) {
+        sync();
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
     server->Route("POST", "/api/ftp/delete", [](const HttpRequest &req) {
         std::string path = JsonExtractString(req.body, "path");
         if (path.empty()) return HttpResponse::Error("missing 'path'");
@@ -1244,7 +1660,10 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         std::string err;
         ImmediateFileMutationGuard mutation(&err);
         if (!mutation) return HttpResponse::Error(err, 409);
-        if (!SetNativePermissions(path, static_cast<uint32_t>(mode), &err)) return HttpResponse::Error(err, 500);
+        bool ok = JsonExtractBool(req.body, "recursive", false)
+                      ? SetNativePermissionsTree(path, static_cast<uint32_t>(mode), &err)
+                      : SetNativePermissions(path, static_cast<uint32_t>(mode), &err);
+        if (!ok) return HttpResponse::Error(err, 500);
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
@@ -1410,7 +1829,23 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
     server->Route("GET", "/api/files/jobs", [](const HttpRequest &) {
         std::vector<std::string> items;
         for (const auto &job : GetFileJobs()) items.push_back(FileJobToJson(job));
-        return HttpResponse::Json(JsonWriter().Raw("jobs", JsonWriter::Array(items)).Done());
+        return HttpResponse::Json(JsonWriter().Raw("jobs", JsonWriter::Array(items)).Bool("paused", FileJobsPaused()).Done());
+    });
+
+    server->Route("POST", "/api/files/jobs/pause", [](const HttpRequest &req) {
+        SetFileJobsPaused(JsonExtractBool(req.body, "paused", true));
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+    });
+
+    server->Route("POST", "/api/files/jobs/move", [](const HttpRequest &req) {
+        int id = JsonExtractInt(req.body, "id", 0);
+        std::string direction = JsonExtractString(req.body, "direction");
+        std::string err;
+        if (id <= 0 || (direction != "up" && direction != "down") ||
+            !MoveFileJob(static_cast<uint64_t>(id), direction == "up", &err)) {
+            return HttpResponse::Error(err.empty() ? "invalid job move" : err, 409);
+        }
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
     server->Route("POST", "/api/files/jobs/cancel", [](const HttpRequest &req) {
@@ -1422,8 +1857,8 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
-    server->Route("POST", "/api/files/jobs/clear", [](const HttpRequest &) {
-        ClearFinishedFileJobs();
+    server->Route("POST", "/api/files/jobs/clear", [](const HttpRequest &req) {
+        ClearFinishedFileJobs(JsonExtractBool(req.body, "only_done", false));
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
@@ -1562,6 +1997,27 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         return resp;
     });
 
+    // A SELF comes back as a plain ELF. Other files stream through unchanged.
+    server->Route("GET", "/api/ftp/download-decrypted", [](const HttpRequest &req) {
+        std::string path = req.Query("path");
+        if (path.empty()) return HttpResponse::Error("missing 'path'");
+        auto lease = std::make_shared<FileReadLease>(path);
+        if (!*lease) return HttpResponse::Error(lease->Error(), 409);
+        std::string err;
+        auto stream = OpenDecryptedFile(path, lease, &err);
+        if (!stream) return HttpResponse::Error(err, 502);
+
+        std::string filename = fs::path(path).filename().string();
+        if (filename.size() > 5 && filename.compare(filename.size() - 5, 5, ".self") == 0) {
+            filename.replace(filename.size() - 5, 5, ".elf");
+        }
+        HttpResponse resp;
+        resp.content_type = "application/octet-stream";
+        resp.body_stream = stream;
+        resp.extra_headers["Content-Disposition"] = ContentDisposition(filename);
+        return resp;
+    });
+
     server->DirectUploadRoute("POST", "/api/ftp/upload", "path", 256 * kGiB, [](const HttpRequest &req) {
         std::string path = req.Query("path");
         bool overwrite = req.Query("overwrite") == "1";
@@ -1633,13 +2089,35 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         }
         if (complete) {
             ReleaseFileUpload(path, upload_id);
-            LogEvent("Completed resumable upload: " + path + " (" + std::to_string(total) + " bytes)");
+            long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - req.received_at).count();
+            LogEvent("Completed resumable upload: " + path + " (" + std::to_string(total) + " bytes, " + std::to_string(ms) + " ms)");
         }
         return HttpResponse::Json(JsonWriter()
                                       .Bool("ok", true)
                                       .Bool("complete", complete)
                                       .Int("next_offset", static_cast<long long>(next))
                                       .Done());
+    });
+
+    // One 1 MiB piece of a direct-install package. The WebSocket still carries the control messages.
+    server->Route("POST", "/api/pkg/live/segment", [](const HttpRequest &req) {
+        uint64_t seg = 0;
+        if (!ParseUint64(req.Query("seg"), &seg)) return HttpResponse::Error("invalid segment");
+        int rc = PkgLiveCache::TryWrite(seg * kPkgLiveSegSize, req.body.data(), req.body.size());
+        if (rc == 0) return HttpResponse::Json("{\"op\":\"ack\",\"seg\":" + std::to_string(seg) + "}");
+        if (rc == -2) return HttpResponse::Json("{\"op\":\"busy\",\"seg\":" + std::to_string(seg) + "}");
+        return HttpResponse::Error("rejected", 409);
+    });
+
+    server->Route("POST", "/api/ftp/upload/cancel", [](const HttpRequest &req) {
+        std::string path = JsonExtractString(req.body, "path");
+        std::string upload_id = JsonExtractString(req.body, "upload_id");
+        if (path.empty() || path[0] != '/' || path.find("..") != std::string::npos || !SafeUploadId(upload_id)) {
+            return HttpResponse::Error("invalid upload to cancel");
+        }
+        CancelFileUpload(path, upload_id);
+        std::remove((path + ".pmgr-part-" + upload_id).c_str());
+        return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
     server->Route("GET", "/api/elfldr/status", [](const HttpRequest &) {
@@ -1905,7 +2383,14 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
     // ---- Embedded frontend --------------------------------------------------
 
     server->SetStaticFallback([](const std::string &url) {
-        HttpResponse response = ServeEmbeddedAsset(url);
+        // Browsers ask for /favicon.ico on their own when saving a bookmark.
+        bool is_icon = url == "/favicon.ico" || url.rfind("/icon-", 0) == 0;
+        HttpResponse response = ServeEmbeddedAsset(url == "/favicon.ico" ? "/icon-32.png" : url);
+        if (is_icon) {
+            // A page marked no-store keeps its icon out of the bookmark, so icons may be cached.
+            response.extra_headers["Cache-Control"] = "public, max-age=3600";
+            return response;
+        }
         // A redeployed ELF must never keep the PS5 browser on an older JS
         // bundle whose API method/body contract belongs to the previous build.
         response.extra_headers["Cache-Control"] = "no-store, no-cache, must-revalidate";

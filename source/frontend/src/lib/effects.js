@@ -8,6 +8,18 @@ export function isPS5() {
   return /PlayStation/i.test(navigator.userAgent)
 }
 
+// The console's WebKit may lack flex gap; index.css spaces rows with margins then.
+export function markFlexGap() {
+  const probe = document.createElement('div')
+  probe.style.cssText = 'display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden'
+  probe.appendChild(document.createElement('div'))
+  probe.appendChild(document.createElement('div'))
+  document.body.appendChild(probe)
+  const supported = probe.scrollHeight === 1
+  document.body.removeChild(probe)
+  document.documentElement.classList.toggle('pmgr-no-flex-gap', !supported)
+}
+
 export function applyEffects(reduced) {
   document.documentElement.classList.toggle('pmgr-low-power', reduced)
 }

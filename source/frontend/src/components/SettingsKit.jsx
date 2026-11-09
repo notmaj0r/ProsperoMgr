@@ -7,12 +7,12 @@ import { useI18n } from '../lib/i18n.jsx'
 
 export function SectionHero({ icon, title, description, status }) {
   return (
-    <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-panel-border bg-panel p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+    <div className="pmgr-surface mb-4 flex flex-col gap-3 rounded-2xl border border-panel-border bg-panel p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
       <div className="flex items-center gap-3">
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent">{icon}</span>
         <div className="min-w-0">
           <h2 className="text-base font-bold text-text">{title}</h2>
-          {description && <p className="mt-0.5 max-w-md text-sm text-text-dim">{description}</p>}
+          {description && <p className="mt-0.5 max-w-xl text-sm text-text-dim">{description}</p>}
         </div>
       </div>
       {status && <div className="shrink-0 sm:pl-3">{status}</div>}
@@ -24,7 +24,7 @@ export function SectionHero({ icon, title, description, status }) {
 // only separates it from the *next* row, which would vanish for a single-row section (e.g. Danger Zone).
 export function SettingsSection({ title, description, children, className = '' }) {
   return (
-    <div className={`mb-4 rounded-2xl border border-panel-border bg-panel p-4 sm:p-5 ${className}`}>
+    <div className={`pmgr-surface mb-4 rounded-2xl border border-panel-border bg-panel p-4 sm:p-5 ${className}`}>
       {title && (
         <div className="mb-3 border-b border-panel-border pb-3">
           <h3 className="text-sm font-bold text-text">{title}</h3>
@@ -37,7 +37,7 @@ export function SettingsSection({ title, description, children, className = '' }
 }
 
 // Label + short explanation on the left, a single control on the right — the shape every
-// toggle/fan-mode setting shares. Only handles row-to-row separation; the section header divider covers the first row.
+// toggle/fan-mode setting shares. Only separates rows; the section header divider covers the first one.
 export function SettingsRow({ title, description, control }) {
   return (
     <div className="flex flex-col gap-2 border-b border-panel-border py-3 last:border-b-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-4">

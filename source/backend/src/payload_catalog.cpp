@@ -21,11 +21,18 @@ namespace {
 // Curated at build time from the actual project READMEs/GitHub metadata.
 // A-Z by developer.
 const std::vector<PayloadCatalogEntry> kCatalog = {
+    {"aydencharles", "onionHEN", "All-in-one HEN and toolbox for the PS5.",
+     "https://github.com/aydencharles/onionHEN"},
+
     {"BestPig", "BackPork", "Lets you sideload system libraries into PS5 games.",
      "https://github.com/BestPig/BackPork"},
 
+    {"drakmor", "fan_target", "Keeps the fan at a chosen target temperature while automatic fan control stays on.",
+     "https://github.com/drakmor/fan_target"},
     {"drakmor", "nanoDNS", "DNS proxy for PS4/PS5 with local domain overrides.",
      "https://github.com/drakmor/nanoDNS"},
+    {"drakmor", "ps5-hwinfo", "Reports PS5 hardware telemetry and runs read-only disk benchmarks.",
+     "https://github.com/drakmor/ps5-hwinfo"},
     {"drakmor", "ShadowMountPlus", "Automated background auto-mounter for game dumps on jailbroken PS5s.",
      "https://github.com/drakmor/ShadowMountPlus"},
 
@@ -55,6 +62,14 @@ const std::vector<PayloadCatalogEntry> kCatalog = {
     {"OpenSourcereR-dev", "ps5debug-NG", "Userland TCP debugger server for PS5, wire-compatible with ps5debug.",
      "https://github.com/OpenSourcereR-dev/ps5debug-NG"},
 
+    {"owendswang", "ps5-fan-control", "Daemon that sets the system fan temperature threshold.",
+     "https://github.com/owendswang/ps5-fan-control"},
+    {"owendswang", "ps5-web-file-manager", "File manager with a web UI, made for copying game dumps between storages.",
+     "https://github.com/owendswang/ps5-web-file-manager"},
+
+    {"phantomptr", "ps5upload", "Fast PS5 file transfers and package installs from a desktop app.",
+     "https://github.com/phantomptr/ps5upload"},
+
     {"Phoenixx1202", "Spectrum Library",
      "Lightweight content manager for browsing, downloading, and tracking supported game files.",
      "https://github.com/Phoenixx1202/Spectrum-Library"},
@@ -63,6 +78,8 @@ const std::vector<PayloadCatalogEntry> kCatalog = {
      "https://github.com/itsPLK/PS5-Lapy-JB-Daemon"},
     {"PLK", "ps5-payload-manager", "Web-based dashboard to manage, import, and auto-load PS5 payloads.",
      "https://github.com/itsPLK/ps5-payload-manager"},
+    {"PLK", "ps5-pkg-manager", "Browse and install packages from USB or a network share.",
+     "https://github.com/itsPLK/ps5-pkg-manager"},
     {"PLK", "ps5-webkit-autoloader", "Autoloads a payload through the PS5 browser's WebKit exploit chain.",
      "https://github.com/itsPLK/ps5-webkit-autoloader"},
 
@@ -77,14 +94,17 @@ const std::vector<PayloadCatalogEntry> kCatalog = {
      "https://github.com/ps5-payload-dev/websrv"},
     {"PS5-Payload-Dev", "shsrv", "Telnet-like shell server, port 2323.",
      "https://github.com/ps5-payload-dev/shsrv"},
+    {"PS5-Payload-Dev", "offact", "Activates offline accounts on a jailbroken PS5.",
+     "https://github.com/ps5-payload-dev/offact"},
     {"PS5-Payload-Dev", "gdbsrv", "GDB server for jailbroken PS4/PS5, port 2159.",
      "https://github.com/ps5-payload-dev/gdbsrv"},
     {"PS5-Payload-Dev", "klogsrv", "Streams /dev/klog to sockets on port 3232.",
      "https://github.com/ps5-payload-dev/klogsrv"},
 
-    {"StonedModder", "Ghostcontrol-PS5-USB-Controller-Patcher",
-     "Lets other controllers work via the PS5's front USB port.",
-     "https://github.com/StonedModder/Ghostcontrol-PS5-USB-Controller-Patcher"},
+    {"seregonwar", "zftpd", "High-performance FTP daemon for jailbroken consoles.",
+     "https://github.com/seregonwar/zftpd"},
+
+    {"Sonic-Iso", "elf-arsenal", "All-in-one PS5 utility.", "https://git.etawen.dev/soniciso/elf-arsenal"},
 };
 
 std::string ToLowerAscii(const std::string &s) {
@@ -182,8 +202,7 @@ bool PersistCustomLocked(std::string *err) {
     return true;
 }
 
-// Per-URL cache, same TTL/cooldown shape the old repository browser used —
-// GitHub's unauthenticated API caps out at 60 requests/hour per IP.
+// Per-URL cache: GitHub's unauthenticated API allows 60 requests/hour per IP.
 struct CacheEntry {
     CatalogVersionStatus status;
     std::chrono::steady_clock::time_point fetched_at;

@@ -79,6 +79,7 @@ class Autoloader {
     void StartWorker(AutoloaderRunMode mode);
     void Worker(AutoloaderRunMode mode);
     bool InterruptibleSleep(int milliseconds);
+    bool PageOpen() const;
 
     Config cfg_;
     const PayloadRegistry *registry_;
@@ -92,6 +93,7 @@ class Autoloader {
     std::atomic<int> failed_{0};
     std::atomic<bool> already_loaded_{false};
     std::atomic<int> skipped_{0};
+    mutable std::atomic<int64_t> last_poll_ms_{0}; // when the web page last asked for the status
 
     mutable std::mutex current_mu_;
     std::string current_;

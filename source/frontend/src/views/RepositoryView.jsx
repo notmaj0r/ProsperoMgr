@@ -139,7 +139,7 @@ export default function RepositoryView() {
       <Panel
         title={t('repositories.title')}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="mt-3 grid w-full grid-cols-1 gap-2 sm:mt-0 sm:flex sm:w-auto sm:items-center">
             <Button tone="neutral" icon={<PlusIcon size={15} />} onClick={() => setAddOpen(true)}>
               {t('repositories.addRepository')}
             </Button>
@@ -188,7 +188,7 @@ export default function RepositoryView() {
           </div>
         )}
 
-        {error && <div className="mb-4 rounded-xl border border-err/25 bg-err/10 px-3.5 py-3 text-sm text-err">{error}</div>}
+        {error && <div className="pmgr-notice-in mb-4 rounded-xl border border-err/25 bg-err/10 px-3.5 py-3 text-sm text-err">{error}</div>}
 
         <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center">
           <SearchField value={search} onChange={setSearch} placeholder={t('repositories.searchPlaceholder')} className="flex-1" />
@@ -223,6 +223,7 @@ export default function RepositoryView() {
                 {items.map((entry) => (
                   <article
                     key={entry.url}
+                    data-menu-host
                     className="group flex min-w-0 flex-col rounded-xl border border-panel-border bg-panel p-3.5 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-accent/35 hover:shadow-[0_10px_26px_-14px_rgba(0,0,0,0.5)] focus-within:-translate-y-0.5 focus-within:border-accent/35"
                   >
                     <div className="flex min-w-0 items-start justify-between gap-2">

@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "raw_name.hpp"
+
 namespace prospero {
 
 class JsonWriter {
@@ -49,7 +51,7 @@ class JsonWriter {
     static std::string Quote(const std::string &raw) {
         std::string out = "\"";
         out.reserve(raw.size() + 2);
-        for (unsigned char c : raw) {
+        for (unsigned char c : NameToUtf8(raw)) {
             switch (c) {
                 case '"': out += "\\\""; break;
                 case '\\': out += "\\\\"; break;

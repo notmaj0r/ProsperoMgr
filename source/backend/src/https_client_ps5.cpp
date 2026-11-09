@@ -132,7 +132,8 @@ bool HttpsClient::Get(const std::string &url, HttpsResponse *out, std::string *e
 }
 
 bool HttpsClient::DownloadToFile(const std::string &url, const std::string &local_path,
-                                 std::string *err, const DownloadProgressFn &progress, NetErrorKind *kind) {
+                                 std::string *err, const DownloadProgressFn &progress, NetErrorKind *kind,
+                                 const DownloadCancelFn &cancel) {
     if (kind) *kind = NetErrorKind::kNone;
     std::string label = RequestLabel(url);
 
@@ -150,11 +151,17 @@ bool HttpsClient::DownloadToFile(const std::string &url, const std::string &loca
         }
     };
 
+    auto cancelTrampoline = [](void *opaque) -> int {
+        auto *fn = static_cast<const DownloadCancelFn *>(opaque);
+        return fn && *fn && (*fn)() ? 1 : 0;
+    };
+
     prosperomgr_http_result result{};
     int rc = prosperomgr_ps5_http_download(url.c_str(), local_path.c_str(), &result,
                                            progress ? +trampoline : nullptr,
                                            progress ? const_cast<DownloadProgressFn *>(&progress) : nullptr,
-                                           nullptr, nullptr);
+                                           cancel ? +cancelTrampoline : nullptr,
+                                           cancel ? const_cast<DownloadCancelFn *>(&cancel) : nullptr);
     LogResult(label, result);
     if (result.bytes > 0 && result.total_ms > 0) {
         long long kb_s = result.bytes / result.total_ms; // bytes/ms == KB/s

@@ -1,5 +1,8 @@
 #include "pkg_ws_upload.hpp"
 
+#include <atomic>
+#include <chrono>
+
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -13,6 +16,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "job_queue.hpp"
@@ -29,6 +33,9 @@ namespace prospero {
 
 namespace {
 
+// Time the upload thread spent blocked in recv(), i.e. waiting for the browser.
+std::atomic<uint64_t> g_recv_wait_us{0};
+
 // Reachable from the LAN (a PC browser), unlike the loopback-only pkg_stream port —
 // same trust model as the rest of ProsperoMgr's unauthenticated local API.
 constexpr uint16_t kPort = 9046;
@@ -37,6 +44,7 @@ constexpr const char *kGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 constexpr size_t kTextMax = 4096;
 constexpr size_t kBinMax = kPkgLiveSegSize + 64 * 1024; // one segment plus frame slack
 constexpr int kIoTimeoutSec = 30;
+constexpr int kListenRcvBuf = 4 * 1024 * 1024;
 constexpr size_t kRecvChunk = 1024 * 1024; // fewer syscalls draining a pipelined burst
 
 Config g_cfg;
@@ -169,9 +177,26 @@ void EncodeFrame(unsigned char opcode, const void *payload, size_t len, std::vec
     }
 }
 
+// Browsers mask every client frame; XOR eight bytes at a time instead of one.
+void Unmask(unsigned char *data, size_t len, const unsigned char *mask) {
+    unsigned char wide_bytes[8];
+    for (int i = 0; i < 8; i++) wide_bytes[i] = mask[i & 3];
+    uint64_t wide = 0;
+    std::memcpy(&wide, wide_bytes, sizeof(wide));
+    size_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t word;
+        std::memcpy(&word, data + i, sizeof(word));
+        word ^= wide;
+        std::memcpy(data + i, &word, sizeof(word));
+    }
+    for (; i < len; i++) data[i] ^= mask[i & 3];
+}
+
 // Returns bytes consumed, 0 if the buffer holds an incomplete frame, -1 on a protocol error.
-int DecodeFrame(const unsigned char *buf, size_t buflen, unsigned char *opcode, bool *fin, size_t *pay_off,
-                size_t *pay_len, std::vector<unsigned char> *unmasked) {
+// The payload is unmasked where it sits in `buf`; `pay_off` says where it starts.
+int DecodeFrame(unsigned char *buf, size_t buflen, unsigned char *opcode, bool *fin, size_t *pay_off,
+                size_t *pay_len) {
     if (buflen < 2) return 0;
     unsigned char b0 = buf[0], b1 = buf[1];
     if (b0 & 0x70) return -1; // RSV1-3 must be 0
@@ -197,14 +222,11 @@ int DecodeFrame(const unsigned char *buf, size_t buflen, unsigned char *opcode, 
     if (len > kBinMax + 16) return -1;
     if (buflen < hdr + 4 + static_cast<size_t>(len)) return 0;
 
-    unmasked->resize(static_cast<size_t>(len));
-    const unsigned char *mask = buf + hdr;
-    const unsigned char *pay = buf + hdr + 4;
-    for (uint64_t i = 0; i < len; i++) (*unmasked)[static_cast<size_t>(i)] = pay[i] ^ mask[i % 4];
+    Unmask(buf + hdr + 4, static_cast<size_t>(len), buf + hdr);
 
     *opcode = op;
     *fin = is_fin;
-    *pay_off = 0;
+    *pay_off = hdr + 4;
     *pay_len = static_cast<size_t>(len);
     return static_cast<int>(hdr + 4 + len);
 }
@@ -255,8 +277,15 @@ bool SendTextLocked(int fd, const std::string &text) {
     return SendText(fd, text);
 }
 
-// Registered once with the cache; called from whichever thread is blocked in
-// PkgLiveCache::Read() and needs a segment the browser hasn't sent yet.
+// Tells the browser where the installer is reading, so it can stay just ahead.
+void EmitPos(uint64_t seg) {
+    std::lock_guard<std::mutex> lock(g_uplink_mu);
+    if (g_uplink_fd < 0) return;
+    SendText(g_uplink_fd, "{\"op\":\"pos\",\"r\":" + std::to_string(seg) + "}");
+}
+
+// Called from whichever thread is blocked in PkgLiveCache::Read() on a segment the browser has
+// not sent yet.
 void EmitSeek(uint64_t seg) {
     std::lock_guard<std::mutex> lock(g_uplink_mu);
     if (g_uplink_fd < 0) return;
@@ -289,6 +318,16 @@ void HandleTextMessage(int fd, const std::string &msg, int64_t *pending_seg, boo
         }
         std::string session_id;
         int rc = PkgLiveCache::Create(filename, total, &session_id);
+        // A session the console already read in full is only waiting on the final status.
+        PkgLiveStatus old = PkgLiveCache::GetStatus();
+        if (rc == -2 && old.active && old.total > 0 && old.served >= old.total) {
+            PkgLiveCache::Abort();
+            PkgLiveCache::Destroy();
+            for (int i = 0; i < 20 && rc == -2; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                rc = PkgLiveCache::Create(filename, total, &session_id);
+            }
+        }
         if (rc == -2) {
             SendTextLocked(fd, "{\"op\":\"error\",\"error\":\"an upload is already in progress\"}");
             return;
@@ -297,6 +336,7 @@ void HandleTextMessage(int fd, const std::string &msg, int64_t *pending_seg, boo
             SendTextLocked(fd, "{\"op\":\"error\",\"error\":\"could not start the session\"}");
             return;
         }
+        PkgLiveCache::SetTitle(JsonExtractString(msg, "title"));
         {
             std::lock_guard<std::mutex> lock(g_uplink_mu);
             if (g_uplink_fd >= 0 && g_uplink_fd != fd) {
@@ -307,7 +347,7 @@ void HandleTextMessage(int fd, const std::string &msg, int64_t *pending_seg, boo
         }
         uint64_t offset = PkgLiveCache::GetResumeOffset();
         SendTextLocked(fd, "{\"op\":\"ready\",\"session_id\":\"" + session_id + "\",\"offset\":" +
-                                std::to_string(offset) + "}");
+                                std::to_string(offset) + ",\"slots\":" + std::to_string(PkgLiveCache::SlotCount()) + "}");
         // Starts the installer as soon as the header lands, not once the upload finishes —
         // the cache is smaller than most packages, so it needs a reader draining it.
         StartBackgroundThread([session_id]() {
@@ -335,6 +375,11 @@ void HandleTextMessage(int fd, const std::string &msg, int64_t *pending_seg, boo
         // confirms every byte has now landed at least once.
         *finish_ok = true;
         SendTextLocked(fd, "{\"op\":\"complete\"}");
+    } else if (op == "stats") {
+        if (!IsUplink(fd)) return;
+        LogEvent("[pkgws] browser: read " + JsonExtractString(msg, "read_ms") + " ms/seg, ack " + JsonExtractString(msg, "ack_ms") +
+                 " ms/seg, socket queue avg " + JsonExtractString(msg, "queued_avg_kb") + " / peak " + JsonExtractString(msg, "queued_kb") +
+                 " KB, in flight " + JsonExtractString(msg, "in_flight"));
     } else if (op == "cancel") {
         if (!IsUplink(fd)) { SendTextLocked(fd, "{\"op\":\"error\",\"error\":\"unauthorized\"}"); return; }
         CancelLivePkgInstall();
@@ -380,27 +425,30 @@ void ConnWorker(int fd) {
                         "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
     if (!SendAll(fd, resp.data(), resp.size())) { close(fd); return; }
 
-    std::vector<unsigned char> rbuf(pending);
-    rbuf.reserve(kBinMax + 4096);
+    // One fixed buffer filled in place: no per-read zero-fill, consumed frames advance `start`.
+    std::vector<unsigned char> store(kBinMax + kRecvChunk + 8192);
+    size_t start = 0, end = pending.size();
+    if (end > store.size()) end = 0;
+    if (end) std::memcpy(store.data(), pending.data(), end);
     std::string frag_text;
     std::vector<unsigned char> frag_bin;
     unsigned char frag_op = 0;
     bool frag_on = false;
     int64_t pending_seg = -1;
     bool finish_ok = false;
-    std::vector<unsigned char> unmasked;
 
     for (;;) {
         bool progressed = true;
-        while (progressed && !rbuf.empty()) {
+        while (progressed && end > start) {
             progressed = false;
             unsigned char opcode = 0;
             bool fin = false;
             size_t poff = 0, plen = 0;
-            int used = DecodeFrame(rbuf.data(), rbuf.size(), &opcode, &fin, &poff, &plen, &unmasked);
+            int used = DecodeFrame(store.data() + start, end - start, &opcode, &fin, &poff, &plen);
             if (used == 0) break;
             if (used < 0) { LogEvent("[pkgws] frame decode failed, closing"); goto conn_done; }
             progressed = true;
+            const unsigned char *payload = store.data() + start + poff;
 
             if (opcode == 0x8) { // close
                 std::vector<unsigned char> frame;
@@ -409,7 +457,7 @@ void ConnWorker(int fd) {
                 goto conn_done;
             } else if (opcode == 0x9) { // ping -> pong
                 std::vector<unsigned char> frame;
-                EncodeFrame(0xA, unmasked.data(), std::min(plen, size_t(125)), &frame);
+                EncodeFrame(0xA, payload, std::min(plen, size_t(125)), &frame);
                 SendAll(fd, frame.data(), frame.size());
             } else if (opcode == 0xA) {
                 // pong: ignore
@@ -419,7 +467,7 @@ void ConnWorker(int fd) {
                 if (!is_start && !frag_on) { LogEvent("[pkgws] stray text continuation, closing"); goto conn_done; }
                 if (is_start) { frag_text.clear(); frag_op = 0x1; frag_on = true; }
                 if (frag_text.size() + plen > kTextMax) { LogEvent("[pkgws] text message too large, closing"); goto conn_done; }
-                frag_text.append(reinterpret_cast<char *>(unmasked.data()), plen);
+                frag_text.append(reinterpret_cast<const char *>(payload), plen);
                 if (fin) {
                     HandleTextMessage(fd, frag_text, &pending_seg, &finish_ok);
                     frag_on = false;
@@ -433,14 +481,21 @@ void ConnWorker(int fd) {
                     frag_bin.clear();
                     if (pending_seg < 0) { LogEvent("[pkgws] binary frame without a segment header, closing"); goto conn_done; }
                 }
-                if (frag_bin.size() + plen > kBinMax) { LogEvent("[pkgws] binary message too large, closing"); goto conn_done; }
-                frag_bin.insert(frag_bin.end(), unmasked.begin(), unmasked.begin() + static_cast<long>(plen));
+                // A whole segment in one frame (the normal case) goes to the cache straight from here.
+                const unsigned char *bin = payload;
+                size_t bin_len = plen;
+                if (!(is_start && fin)) {
+                    if (frag_bin.size() + plen > kBinMax) { LogEvent("[pkgws] binary message too large, closing"); goto conn_done; }
+                    frag_bin.insert(frag_bin.end(), payload, payload + plen);
+                    bin = frag_bin.data();
+                    bin_len = frag_bin.size();
+                }
                 if (fin) {
                     uint64_t seg = static_cast<uint64_t>(pending_seg);
                     if (!IsUplink(fd)) {
                         SendTextLocked(fd, "{\"op\":\"error\",\"error\":\"unauthorized\"}");
                     } else {
-                        int wr = PkgLiveCache::TryWrite(seg * kPkgLiveSegSize, frag_bin.data(), frag_bin.size());
+                        int wr = PkgLiveCache::TryWrite(seg * kPkgLiveSegSize, bin, bin_len);
                         if (wr == 0) {
                             SendTextLocked(fd, "{\"op\":\"ack\",\"seg\":" + std::to_string(seg) + "}");
                         } else if (wr == -2) {
@@ -456,27 +511,33 @@ void ConnWorker(int fd) {
                 LogEvent("[pkgws] unexpected frame, closing");
                 goto conn_done;
             }
-            rbuf.erase(rbuf.begin(), rbuf.begin() + used);
+            start += static_cast<size_t>(used);
         }
 
-        if (rbuf.size() >= kBinMax + 4096) { LogEvent("[pkgws] message exceeds limit, closing"); goto conn_done; }
+        if (start == end) start = end = 0;
+        // Slide a partial frame back to the front once the tail is too small for a full read.
+        if (store.size() - end < kRecvChunk) {
+            std::memmove(store.data(), store.data() + start, end - start);
+            end -= start;
+            start = 0;
+        }
+        if (end - start >= kBinMax + 4096) { LogEvent("[pkgws] message exceeds limit, closing"); goto conn_done; }
         {
-            size_t old_size = rbuf.size();
-            rbuf.resize(old_size + kRecvChunk);
-            ssize_t n = recv(fd, rbuf.data() + old_size, kRecvChunk, 0);
+            auto recv_started = std::chrono::steady_clock::now();
+            ssize_t n = recv(fd, store.data() + end, store.size() - end, 0);
+            g_recv_wait_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - recv_started).count());
             if (n < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    rbuf.resize(old_size);
                     // The installer may be parked on a resend while the browser has
                     // nothing new to say — that is not an idle connection.
                     if (PkgLiveCache::WaiterCount() > 0) continue;
                     goto conn_done;
                 }
-                rbuf.resize(old_size);
                 goto conn_done;
             }
-            if (n == 0) { rbuf.resize(old_size); goto conn_done; }
-            rbuf.resize(old_size + static_cast<size_t>(n));
+            if (n == 0) goto conn_done;
+            end += static_cast<size_t>(n);
         }
     }
 
@@ -500,6 +561,12 @@ void ListenLoop() {
     if (server < 0) return;
     int reuse = 1;
     setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    // Must be set on the listener: OrbisOS ignores it on an accepted socket and keeps the small default.
+    int rcvbuf = kListenRcvBuf;
+    setsockopt(server, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    int effective = -1;
+    socklen_t effective_len = sizeof(effective);
+    if (getsockopt(server, SOL_SOCKET, SO_RCVBUF, &effective, &effective_len) != 0) effective = -1;
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -510,8 +577,10 @@ void ListenLoop() {
         LogEvent("PKG direct-install listener could not bind port " + std::to_string(kPort));
         return;
     }
-    LogEvent("PKG direct-install listener ready on port " + std::to_string(kPort));
+    LogEvent("PKG direct-install listener ready on port " + std::to_string(kPort) +
+             " (SO_RCVBUF=" + std::to_string(effective) + ")");
     PkgLiveCache::SetSeekFn(EmitSeek);
+    PkgLiveCache::SetPosFn(EmitPos);
     PkgLiveCache::SetDoneFn(OnSessionDone);
 
     for (;;) {
@@ -522,6 +591,8 @@ void ListenLoop() {
 }
 
 } // namespace
+
+uint64_t PkgWsRecvWaitMicros() { return g_recv_wait_us.load(); }
 
 void StartPkgWsUpload(const Config &cfg) {
     static std::mutex mu;

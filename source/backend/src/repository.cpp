@@ -294,21 +294,6 @@ bool InstallPayloadAsset(const Config &cfg, const std::string &url, std::string 
     }
 
     fs::path dest = fs::path(cfg.payloads_dir) / filename;
-    std::error_code ec;
-    if (!version.empty() && fs::exists(dest, ec)) {
-        // A different (or unrecorded) version at this filename gets kept, not overwritten —
-        // same version, or no version info at all, still overwrites (a plain redownload/update).
-        auto versions = LoadVersions(cfg);
-        auto it = versions.find(filename);
-        if (it == versions.end() || it->second != version) {
-            std::string unique = UniqueSiblingPath(dest.string());
-            if (!unique.empty()) {
-                dest = unique;
-                filename = dest.filename().string();
-            }
-        }
-    }
-
     if (!FinishDownload(tmp_path, dest, err)) return false;
     if (!version.empty()) RecordVersion(cfg, filename, version);
     RecordPayloadSource(cfg, filename, "repository");

@@ -134,34 +134,78 @@ void ReplaceOrRemoveLine(const std::string &path, const std::string &name, const
     (void)SaveLines(path, lines, &ignored);
 }
 
-void ScanDir(const std::string &dir, bool bundled, std::vector<PayloadInfo> *out) {
+void AddPayload(const fs::path &file, bool bundled, std::vector<PayloadInfo> *out) {
+    PayloadInfo info;
+    info.name = file.filename().string();
+    info.path = fs::absolute(file).string();
+
+    // stat() instead of fs::last_write_time: file_time_type's epoch
+    // isn't guaranteed Unix time on this libc++ build, gave garbage mtimes.
+    struct stat st{};
+    if (stat(info.path.c_str(), &st) == 0) {
+        info.size_bytes = static_cast<uint64_t>(st.st_size);
+        info.mtime_unix = static_cast<int64_t>(st.st_mtime);
+    }
+
+    info.bundled = bundled;
+    out->push_back(std::move(info));
+}
+
+// `nested` also picks up payloads in subfolders, one level (<dir>/<name>/<file>.elf) or two
+// (<dir>/local/<slot>/<file>.elf), the layouts Payload Manager uses. A loose file wins over a nested one.
+void ScanDir(const std::string &dir, bool bundled, std::vector<PayloadInfo> *out, bool nested = false) {
     std::error_code ec;
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) return;
 
-    // Payload Manager keeps each payload in its own subdirectory. Do not follow
-    // directory symlinks, which could lead outside the shared library or loop.
-    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
-    for (; !ec && it != end; it.increment(ec)) {
-        const auto &entry = *it;
+    auto subfolders = [&](const fs::path &parent) {
+        std::vector<fs::path> found;
+        for (const auto &entry : fs::directory_iterator(parent, ec)) {
+            if (entry.is_directory(ec) && entry.path().filename().string()[0] != '.') found.push_back(entry.path());
+        }
+        std::sort(found.begin(), found.end());
+        return found;
+    };
+    auto addNested = [&](const fs::path &folder) {
+        for (const auto &entry : fs::directory_iterator(folder, ec)) {
+            if (!entry.is_regular_file(ec) || !IsElf(entry.path())) continue;
+            std::string name = entry.path().filename().string();
+            bool taken = std::any_of(out->begin(), out->end(), [&](const PayloadInfo &item) { return item.name == name; });
+            if (!taken) AddPayload(entry.path(), bundled, out);
+        }
+    };
+
+    for (const auto &entry : fs::directory_iterator(dir, ec)) {
         if (!entry.is_regular_file(ec)) continue;
         if (!IsElf(entry.path())) continue;
         if (bundled && IsPrivateBundledHelper(entry.path())) continue;
-
-        PayloadInfo info;
-        info.name = entry.path().filename().string();
-        info.path = fs::absolute(entry.path()).string();
-
-        // stat() instead of fs::last_write_time: file_time_type's epoch
-        // isn't guaranteed Unix time on this libc++ build, gave garbage mtimes.
-        struct stat st{};
-        if (stat(info.path.c_str(), &st) == 0) {
-            info.size_bytes = static_cast<uint64_t>(st.st_size);
-            info.mtime_unix = static_cast<int64_t>(st.st_mtime);
-        }
-
-        info.bundled = bundled;
-        out->push_back(std::move(info));
+        AddPayload(entry.path(), bundled, out);
     }
+    if (!nested) return;
+
+    for (const auto &first : subfolders(dir)) {
+        addNested(first);
+        for (const auto &second : subfolders(first)) addNested(second);
+    }
+}
+
+// Where Payload Manager keeps what it downloads.
+constexpr const char *kPayloadManagerDir = "/data/pldmgr/payloads";
+
+bool InPayloadManagerDir(const std::string &path) { return path.rfind(std::string(kPayloadManagerDir) + "/", 0) == 0; }
+
+// Uploaded payloads, plus the ones Payload Manager installed. On a name clash the newer file wins,
+// so an update made by either manager is the copy that shows up.
+std::vector<PayloadInfo> ImportedPayloads(const Config &cfg) {
+    std::vector<PayloadInfo> imported;
+    ScanDir(cfg.payloads_dir, /*bundled=*/false, &imported, /*nested=*/true);
+    std::vector<PayloadInfo> shared;
+    ScanDir(kPayloadManagerDir, /*bundled=*/false, &shared, /*nested=*/true);
+    for (auto &candidate : shared) {
+        auto existing = std::find_if(imported.begin(), imported.end(), [&](const PayloadInfo &item) { return item.name == candidate.name; });
+        if (existing == imported.end()) imported.push_back(std::move(candidate));
+        else if (candidate.mtime_unix > existing->mtime_unix) *existing = std::move(candidate);
+    }
+    return imported;
 }
 
 } // namespace
@@ -171,17 +215,7 @@ PayloadRegistry::PayloadRegistry(Config cfg) : cfg_(std::move(cfg)) {}
 std::vector<PayloadInfo> PayloadRegistry::List() const {
     std::vector<PayloadInfo> out;
     ScanDir(cfg_.bundled_dir, /*bundled=*/true, &out);
-    std::vector<PayloadInfo> imported;
-    ScanDir(cfg_.payloads_dir, /*bundled=*/false, &imported);
-    // Keep filename-based identity: flat uploads take precedence over nested
-    // copies; duplicate nested filenames resolve consistently by path.
-    const auto root = fs::absolute(cfg_.payloads_dir).lexically_normal();
-    std::sort(imported.begin(), imported.end(), [&](const PayloadInfo &a, const PayloadInfo &b) {
-        bool a_flat = fs::path(a.path).parent_path().lexically_normal() == root;
-        bool b_flat = fs::path(b.path).parent_path().lexically_normal() == root;
-        if (a_flat != b_flat) return a_flat;
-        return a.path < b.path;
-    });
+    std::vector<PayloadInfo> imported = ImportedPayloads(cfg_);
     // An uploaded payload deliberately shadows a bundled one with the same name;
     // deleting the override reveals the bundled copy again.
     for (auto &candidate : imported) {
@@ -189,7 +223,7 @@ std::vector<PayloadInfo> PayloadRegistry::List() const {
             return item.name == candidate.name;
         });
         if (existing == out.end()) out.push_back(std::move(candidate));
-        else if (existing->bundled) *existing = std::move(candidate);
+        else *existing = std::move(candidate);
     }
 
     auto disabled = LoadDisabled(cfg_);
@@ -212,6 +246,7 @@ std::vector<PayloadInfo> PayloadRegistry::List() const {
         if (source != sources.end()) info.source = source->second;
         auto source_url = source_urls.find(info.name);
         if (source_url != source_urls.end()) info.source_url = source_url->second;
+        if (InPayloadManagerDir(info.path)) info.source = "payloadManager";
     }
     return out;
 }
@@ -278,25 +313,36 @@ bool PayloadRegistry::Delete(const std::string &name, std::string *err) const {
         return false;
     }
 
-    std::string resolved;
-    for (const auto &info : List()) {
-        if (info.name == name && !info.bundled) { resolved = info.path; break; }
-    }
-    if (resolved.empty()) {
-        if (err) *err = "payload not found in payloads_dir (bundled payloads can't be deleted): " + name;
-        return false;
-    }
-    fs::path path = resolved;
-    std::error_code ec;
-    if (!fs::exists(path, ec)) {
+    // The listing knows where it lives, including inside a subfolder of a shared library.
+    std::vector<PayloadInfo> imported = ImportedPayloads(cfg_);
+    auto found = std::find_if(imported.begin(), imported.end(), [&](const PayloadInfo &item) { return item.name == name; });
+    if (found == imported.end()) {
         if (err) *err = "payload not found in payloads_dir (bundled payloads can't be deleted): " + name;
         return false;
     }
 
+    fs::path path = found->path;
+    std::error_code ec;
     fs::remove(path, ec);
     if (ec) {
         if (err) *err = "remove() failed: " + ec.message();
         return false;
+    }
+    // A subfolder left with nothing but Payload Manager's meta.json goes too, so no empty slot stays behind.
+    fs::path root = fs::absolute(cfg_.payloads_dir).lexically_normal();
+    if (InPayloadManagerDir(path.string())) root = kPayloadManagerDir;
+    if (!root.has_filename()) root = root.parent_path();
+    fs::path parent = path.parent_path();
+    if (parent != root && parent.string().rfind(root.string() + "/", 0) == 0) {
+        bool only_meta = true;
+        for (const auto &entry : fs::directory_iterator(parent, ec)) {
+            if (entry.path().filename() != "meta.json") only_meta = false;
+        }
+        // Only meta.json can be left here, so two plain removes do it without a recursive removal.
+        if (only_meta) {
+            fs::remove(parent / "meta.json", ec);
+            fs::remove(parent, ec);
+        }
     }
     std::lock_guard<std::mutex> lock(g_state_mu);
     ReplaceOrRemoveLine(DisabledListPath(cfg_), name, "");
@@ -409,18 +455,15 @@ bool PayloadRegistry::Rename(const std::string &name, const std::string &new_nam
         return false;
     }
     if (name == new_name) return true;
-    std::string resolved;
-    for (const auto &info : List()) {
-        if (info.name == new_name) { if (err) *err = "a payload with that name already exists"; return false; }
-        if (info.name == name && !info.bundled) resolved = info.path;
-    }
-    if (resolved.empty()) { if (err) *err = "only uploaded payloads can be renamed"; return false; }
-    fs::path source = resolved;
+    // The renamed file stays in its own folder, including a subfolder of a shared library.
+    std::vector<PayloadInfo> imported = ImportedPayloads(cfg_);
+    auto found = std::find_if(imported.begin(), imported.end(), [&](const PayloadInfo &item) { return item.name == name; });
+    if (found == imported.end()) { if (err) *err = "only uploaded payloads can be renamed"; return false; }
+    fs::path source = found->path;
     fs::path destination = source.parent_path() / new_name;
     std::error_code ec;
-    if (!fs::is_regular_file(source, ec)) { if (err) *err = "only uploaded payloads can be renamed"; return false; }
-    ec.clear();
-    if (fs::exists(destination, ec)) { if (err) *err = "a payload with that name already exists"; return false; }
+    bool taken = std::any_of(imported.begin(), imported.end(), [&](const PayloadInfo &item) { return item.name == new_name; });
+    if (taken || fs::exists(destination, ec)) { if (err) *err = "a payload with that name already exists"; return false; }
     fs::rename(source, destination, ec);
     if (ec) { if (err) *err = "could not rename payload: " + ec.message(); return false; }
 

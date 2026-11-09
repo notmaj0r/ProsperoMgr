@@ -2,6 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Safari before 14 cannot parse :where(), which drops Tailwind's own button reset;
+   this is the same reset without it. */
+@layer base {
+  button {
+    -webkit-appearance: button;
+    background-color: transparent;
+    background-image: none;
+  }
+}
+
 /* Old WebKit can't parse dvh — the vh line keeps it usable, dvh overrides it where
    supported since a later valid declaration on the same property wins. */
 .pmgr-h-dvh-100 { height: 100vh; height: 100dvh; }
@@ -18,11 +28,8 @@
   .aspect-square { padding-bottom: 100%; }
 }
 
-/* Graphite/navy surfaces, cold blue brand identity. Brand (--color-accent)
-   means primary action / selection / navigation / identity — it is
-   deliberately NOT the same token as --color-info, which means "something
-   is happening" (transfers, progress, background jobs). Keeping those
-   separate is what stops one color from tinting the whole app. */
+/* Brand (--color-accent) is for actions, selection and navigation. --color-info is for
+   activity (transfers, progress, jobs); keep them separate. */
 :root {
   --color-bg: #0a0e16;
   --color-bg-rgb: 10, 14, 22;
@@ -73,9 +80,8 @@ body,
   box-sizing: border-box;
 }
 
-/* Theme presets, picked from Settings → Appearance. Each redefines the full
-   token set so they don't have to compose — "dark" (the default) needs no
-   attribute at all. */
+/* Theme presets from Settings, Appearance. Each redefines the full token set;
+   dark is the default and needs no attribute. */
 html[data-pmgr-theme="light"] {
   color-scheme: light;
   --color-bg: #f4f8fc;
@@ -108,11 +114,8 @@ html:not([data-pmgr-theme="light"]) {
   color-scheme: dark;
 }
 
-/* The header's social buttons use white text over a translucent dark tint —
-   reads great on the dark theme's near-black background, but alpha-blended
-   over Light's white panel that same tint washes out to pale and the white
-   text goes near-invisible. Solid brand colors instead, so contrast holds
-   regardless of what's behind them. */
+/* Solid brand colors on the Light theme: the translucent tint washes out and the white
+   text loses contrast there. */
 html[data-pmgr-theme="light"] .pmgr-social-discord {
   background: #5865f2;
   border-color: rgba(88, 101, 242, 0.6);
@@ -255,6 +258,15 @@ textarea:focus {
   outline-offset: 3px;
 }
 
+/* The console steers a cursor and has no :focus-visible, so a clicked control must not keep a
+   ring behind: it would read as a second pointer. Text fields keep their own focus style. */
+html.pmgr-ps5 button:focus,
+html.pmgr-ps5 a:focus,
+html.pmgr-ps5 [role='menuitem']:focus,
+html.pmgr-ps5 [tabindex]:focus {
+  outline: none;
+}
+
 @media (pointer: coarse) {
   .pmgr-button.pmgr-icon-btn {
     min-width: 44px;
@@ -267,9 +279,7 @@ textarea:focus {
   background: rgba(var(--color-accent-rgb), 0.65);
 }
 
-/* Prose stays system-sans; anything data-ish (pills, version tags, stat
-   readouts) goes monospace for a technical-dashboard feel instead of
-   blending into the body text. */
+/* Prose is system sans; data-like text (pills, versions, readouts) is monospace. */
 .pmgr-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
 }
@@ -367,9 +377,8 @@ textarea:focus {
   transition: opacity 0.2s ease, transform 0.25s ease;
 }
 
-/* Brand-tinted surface + brand text/icon + the left indicator bar below,
-   instead of painting the whole item opaque accent — less accent
-   dominance across a rail of ten items, still unambiguous which is active. */
+/* Active item: brand-tinted surface, brand text and a left bar, instead of solid accent
+   across the whole rail. */
 .pmgr-nav-item.is-active {
   background: rgba(var(--color-accent-rgb), 0.16);
   color: var(--color-accent);
@@ -544,18 +553,12 @@ textarea:focus {
   }
 }
 
-/* Panel: neutral surface by default — brand color is reserved for actions
-   and selection, not painted onto every container on the page. A Panel is a
-   generic layout container, not an event — it does not animate itself on
-   mount (the view around it already plays pmgr-view-enter once; a panel
-   rising a second time on top of that is the "double entrance" the motion
-   pass fixed). pmgr-panel-in stays defined for the few places that
-   deliberately opt into it (a panel appearing dynamically mid-page, not as
-   part of the initial view mount) by adding the modifier class explicitly. */
+/* Panel: neutral surface, no entrance animation of its own (the page already animates).
+   Add pmgr-panel-in explicitly for panels that appear mid-page. */
 .pmgr-panel {
   position: relative;
   background: linear-gradient(180deg, var(--color-panel-2), var(--color-panel));
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 50px rgba(0, 0, 0, 0.2);
   transition: border-color var(--motion-ui) ease, box-shadow var(--motion-ui) ease;
 }
 
@@ -594,9 +597,7 @@ textarea:focus {
   animation: pmgr-pulse 1.8s ease-in-out infinite;
 }
 
-/* Toast entrance + exit — a toast that's done should leave the same
-   deliberate way it arrived, not vanish mid-frame. Manual dismiss (the ✕
-   button) plays the same exit as the auto-dismiss timeout. */
+/* Toast enter and exit; a manual dismiss plays the same exit as the timeout. */
 @keyframes pmgr-toast-in {
   from {
     opacity: 0;
@@ -641,6 +642,8 @@ textarea:focus {
 /* Payload/game tile: a neutral lift on hover — dozens of these are visible
    at once in a grid, so hover shouldn't paint every one in brand color. */
 .pmgr-tile {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 55%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   transition:
     transform var(--motion-fast) ease,
     border-color var(--motion-fast) ease,
@@ -649,7 +652,7 @@ textarea:focus {
 .pmgr-tile:hover {
   transform: translateY(-2px);
   border-color: #505a68;
-  box-shadow: 0 10px 26px -10px rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 10px 26px -10px rgba(0, 0, 0, 0.5);
 }
 
 /* Full-viewport file targeting keeps drag-and-drop effortless on every
@@ -731,7 +734,6 @@ textarea:focus {
   bottom: 0;
   left: 0;
   pointer-events: none;
-  background: linear-gradient(90deg, transparent 65%, rgba(var(--color-panel-rgb), 0.35));
   content: '';
 }
 .pmgr-game-play {
@@ -762,10 +764,8 @@ textarea:focus {
   transform: rotate(180deg);
 }
 
-/* Collapsible section reveal — grid-template-rows 0fr->1fr instead of
-   mount/unmount, so content height animates smoothly instead of snapping.
-   The inner wrapper needs min-height:0 for the row track to actually
-   collapse, and overflow:hidden so mid-transition content doesn't spill. */
+/* Collapsible reveal: grid rows 0fr to 1fr animate the height. The inner wrapper needs
+   min-height 0 and overflow hidden for the row to collapse. */
 .pmgr-collapse {
   display: grid;
   grid-template-rows: 0fr;
@@ -825,9 +825,7 @@ textarea:focus {
   max-height: none;
 }
 
-/* Modal backdrop — a fullscreen scrim only ever fades. It must never scale
-   or translate like the content sitting on top of it; that's what made
-   dialogs feel like toasts instead of dialogs. */
+/* Modal backdrop: fades only, never scales or moves. */
 @keyframes pmgr-overlay-in {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -872,9 +870,8 @@ textarea:focus {
   animation: pmgr-modal-out var(--motion-instant) cubic-bezier(0.4, 0, 1, 1) both;
 }
 
-/* The path picker has a fixed visual ceiling and lets only its directory list
-   scroll. This prevents the footer from falling below the PS5 browser viewport
-   and keeps volume labels inside their buttons at every supported resolution. */
+/* The path picker has a fixed max height and only its list scrolls, so the footer stays
+   visible in the PS5 browser viewport. */
 .pmgr-path-picker {
   height: 680px;
   max-height: calc(100vh - 32px);
@@ -915,9 +912,7 @@ textarea:focus {
 .pmgr-social-btn:active {
   transform: scale(0.96);
 }
-/* Blur radii kept modest on purpose — the header's own scroll strip only
-   has so much padding to spend on ink overflow before either the glow
-   clips again or the header grows taller than a header should be. */
+/* Blur radii stay small so the glow fits in the header strip's padding without clipping. */
 .pmgr-social-discord {
   border: 1px solid rgba(88, 101, 242, 0.55);
   background: rgba(30, 33, 108, 0.35);
@@ -1029,9 +1024,7 @@ textarea:focus {
   animation: pmgr-badge-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
-/* Modal content — fade + small rise + very subtle scale, distinct from the
-   backdrop it sits on (see pmgr-overlay-in above). Used by dialogs, the
-   Support modal, tour, command palette, and fullscreen log console. */
+/* Modal content: fade, small rise and a slight scale. The backdrop only fades. */
 @keyframes pmgr-pop-in {
   from {
     opacity: 0;
@@ -1089,10 +1082,7 @@ textarea:focus {
   left: 130%;
 }
 
-/* View switch — the whole page content eases in once when you change tabs.
-   Restrained: a small fade + rise, not a slide. Nothing inside should
-   replay this on its own (polling, panels, tiles handle their own, lighter
-   feedback instead — see pmgr-panel/pmgr-tile-in/pmgr-row-in). */
+/* Page switch: one small fade and rise per tab change. Nothing inside should replay it. */
 @keyframes pmgr-view-enter {
   from {
     opacity: 0;
@@ -1128,10 +1118,8 @@ textarea:focus {
   transition: transform var(--motion-instant) ease, filter var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 
-/* Touch hit-area expansion — a dense icon button (three-dot menus, Help,
-   notifications, language picker, per-row actions) can stay visually small
-   while still offering a ~44px tap target on touch devices, via an
-   invisible pseudo-element instead of inflating the visible control. */
+/* Small icon buttons keep their look but get a ~44px touch target through an invisible
+   pseudo-element. */
 @media (hover: none) and (pointer: coarse) {
   .pmgr-icon-btn {
     position: relative;
@@ -1148,8 +1136,133 @@ textarea:focus {
     transform: translate(-50%, -50%);
   }
 }
+/* The console cursor is steered with a stick, so small icon buttons get a 40px target too. */
+html.pmgr-ps5 .pmgr-icon-btn {
+  position: relative;
+}
+html.pmgr-ps5 .pmgr-icon-btn::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100%, 40px);
+  height: max(100%, 40px);
+  transform: translate(-50%, -50%);
+}
+/* Dialogs are read from the couch: larger type, and the narrow ones a little wider. */
+html.pmgr-ps5 [role='dialog'].max-w-md {
+  max-width: 36rem;
+}
+html.pmgr-ps5 [role='dialog'] h2 {
+  font-size: 1.375rem;
+  line-height: 1.25;
+}
+html.pmgr-ps5 [role='dialog'] p,
+html.pmgr-ps5 [role='dialog'] .text-sm {
+  font-size: 1.0625rem;
+  line-height: 1.55;
+}
+html.pmgr-ps5 [role='dialog'] .text-xs {
+  font-size: 0.9375rem;
+}
+
+/* Seen from the couch the support panel needs a wider card and bigger text. */
+html.pmgr-ps5 .pmgr-support-modal {
+  max-width: 50rem;
+}
+html.pmgr-ps5 .pmgr-support-modal h2 {
+  font-size: 1.875rem;
+  line-height: 1.2;
+}
+html.pmgr-ps5 .pmgr-support-modal p {
+  font-size: 1.125rem;
+  line-height: 1.6;
+}
+html.pmgr-ps5 .pmgr-support-option {
+  min-height: 5rem;
+}
+html.pmgr-ps5 .pmgr-support-option strong {
+  font-size: 1.25rem;
+}
+html.pmgr-ps5 .pmgr-support-option small {
+  font-size: 1rem;
+}
+html.pmgr-ps5 .pmgr-support-modal .pmgr-supporter-name {
+  font-size: 1.125rem;
+}
+html.pmgr-ps5 .pmgr-support-modal .text-xs {
+  font-size: 1rem;
+}
+html.pmgr-ps5 .pmgr-crypto-address .break-all {
+  font-size: 1rem;
+}
+/* A step that is loading right now sweeps a highlight; the real progress of one payload is not known. */
+@keyframes pmgr-sweep {
+  from { background-position: -40% 0; }
+  to { background-position: 140% 0; }
+}
+.pmgr-indeterminate {
+  background-image: linear-gradient(90deg, transparent, rgba(var(--color-info-rgb, 56, 189, 248), 0.55), transparent);
+  background-repeat: no-repeat;
+  background-size: 40% 100%;
+  animation: pmgr-sweep 1.2s ease-in-out infinite;
+}
+@keyframes pmgr-tick {
+  from { opacity: 0.4; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes pmgr-pop {
+  0% { opacity: 0; transform: scale(0.6); }
+  70% { opacity: 1; transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.pmgr-tick { animation: pmgr-tick var(--motion-fast) var(--ease-out); }
+.pmgr-pop { animation: pmgr-pop var(--motion-panel) var(--ease-spring) both; }
+html.pmgr-ps5 .pmgr-indeterminate,
+html.pmgr-ps5 .pmgr-tick,
+html.pmgr-ps5 .pmgr-pop,
+.pmgr-low-power .pmgr-indeterminate,
+.pmgr-low-power .pmgr-tick,
+.pmgr-low-power .pmgr-pop {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pmgr-indeterminate,
+  .pmgr-tick,
+  .pmgr-pop { animation: none; }
+}
+
+/* The Autoloader countdown bar glides between the one-second readings. */
+.pmgr-run-bar { transition: width 1s linear; }
+@media (prefers-reduced-motion: reduce) {
+  .pmgr-run-bar { transition: none; }
+}
+
+/* The cursor is imprecise, so every other clickable thing gets a comfortable target as well. */
+html.pmgr-ps5 .pmgr-button,
+html.pmgr-ps5 [role='menuitem'],
+html.pmgr-ps5 [role='tab'] {
+  min-height: 44px;
+}
+html.pmgr-ps5 .pmgr-row-in td {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+html.pmgr-ps5 [role='group'] > button {
+  min-height: 40px;
+}
 .pmgr-icon-btn:active {
   transform: scale(0.88);
+}
+
+/* Header power button: a soft red ring on hover and while its menu is open. */
+.pmgr-power-btn {
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.pmgr-power-btn:hover,
+.pmgr-power-btn[aria-expanded='true'] {
+  background-color: rgba(239, 68, 68, 0.1);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.14);
 }
 
 /* Physical on/off switch — track fill + thumb slide, replaces bare
@@ -1203,9 +1316,7 @@ textarea:focus {
   transition: transform 0.17s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.17s ease,
     background-color 0.17s ease, filter 0.17s ease, box-shadow 0.17s ease;
 }
-/* Neutral lift for every button — tone-specific color (primary blue, danger
-   red, ok green) already comes from each TONES entry in Button.jsx, so hover
-   shouldn't tint a danger or neutral button blue on top of that. */
+/* Neutral hover lift for every button; the tone color already comes from Button.jsx. */
 .pmgr-button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 10px 22px -14px rgba(0, 0, 0, 0.45);
@@ -1352,9 +1463,6 @@ textarea:focus {
   font-weight: 700;
   animation: pmgr-rgb-cycle 3s linear infinite;
 }
-.pmgr-supporter-name:nth-child(2) { animation-delay: -0.75s; }
-.pmgr-supporter-name:nth-child(3) { animation-delay: -1.5s; }
-.pmgr-supporter-name:nth-child(4) { animation-delay: -2.25s; }
 
 @media (max-width: 767px) {
   .pmgr-header,
@@ -1374,12 +1482,8 @@ textarea:focus {
   display: none;
 }
 
-/* Interface effects: Full/Reduced in Settings -> Appearance (a user
-   preference, persisted — distinct from the OS-level prefers-reduced-motion
-   query below, which keeps working independently). Reduced drops decorative/
-   ambient motion and blur; state/color feedback (live dots, toggles,
-   skeletons) is deliberately left out of this list so "something is
-   happening" still reads even with effects reduced. */
+/* Reduced effects drop decorative motion and blur; live dots, toggles and skeletons stay
+   so activity still reads. Separate from the OS prefers-reduced-motion query below. */
 .pmgr-low-power .pmgr-panel,
 .pmgr-low-power .pmgr-panel-in,
 .pmgr-low-power .pmgr-toast,
@@ -1398,6 +1502,7 @@ textarea:focus {
 .pmgr-low-power .pmgr-icon-btn,
 .pmgr-low-power .pmgr-row-in,
 .pmgr-low-power .pmgr-badge-pop,
+.pmgr-low-power .pmgr-power-btn,
 .pmgr-low-power .pmgr-global-drop,
 .pmgr-low-power .pmgr-global-drop-card,
 .pmgr-low-power .pmgr-game-play,
@@ -1441,6 +1546,12 @@ textarea:focus {
 .pmgr-low-power .pmgr-social-bluesky,
 .pmgr-low-power .pmgr-social-support {
   box-shadow: none !important;
+}
+
+/* A blurred cover is a big filtered layer; the reduced and PS5 profiles skip it. */
+.pmgr-low-power .pmgr-cover-bg,
+html.pmgr-ps5 .pmgr-cover-bg {
+  display: none;
 }
 
 /* The PS5 profile avoids large composited surfaces while preserving layout. */
@@ -1496,7 +1607,7 @@ html.pmgr-ps5 .pmgr-home .pmgr-game-art img {
 html.pmgr-ps5 .pmgr-home .pmgr-tile:hover,
 html.pmgr-ps5 .pmgr-home .pmgr-game-play:hover,
 html.pmgr-ps5 .pmgr-home .group:hover .pmgr-home-action-icon,
-html.pmgr-ps5 .pmgr-home .group:focus-visible .pmgr-home-action-icon,
+html.pmgr-ps5 .pmgr-home .group:focus .pmgr-home-action-icon,
 html.pmgr-ps5 .pmgr-home .group:hover .pmgr-home-action-chevron,
 html.pmgr-ps5 .pmgr-home .pmgr-game-art img {
   transform: none;
@@ -1539,6 +1650,7 @@ html.pmgr-ps5 .pmgr-home .pmgr-skeleton {
   .pmgr-btn-sheen::after,
   .pmgr-view-enter,
   .pmgr-icon-btn,
+  .pmgr-power-btn,
   .pmgr-row-in,
   .pmgr-badge-pop,
   .pmgr-global-drop,
@@ -1563,10 +1675,211 @@ html.pmgr-ps5 .pmgr-home .pmgr-skeleton {
     transition: none !important;
   }
 
-  /* The collapse reveal is state feedback (open/closed), not decoration —
-     keep it, just make it instant instead of stripping it to a snap that
-     looks like a bug. */
+  /* The collapse reveal is state feedback, not decoration: keep it, but make it instant. */
   .pmgr-collapse {
     transition-duration: 1ms !important;
   }
 }
+
+
+/* Shared card surface: a faint top highlight and a soft drop, so stacked cards read as layers. */
+.pmgr-surface {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 60%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 14px 32px -24px rgba(0, 0, 0, 0.75);
+}
+html[data-pmgr-theme="light"] .pmgr-surface,
+html[data-pmgr-theme="light"] .pmgr-tile {
+  background-image: none;
+  box-shadow: 0 1px 2px rgba(20, 32, 51, 0.06);
+}
+
+/* Primary buttons get a light top edge so they look pressed-in on click rather than flat. */
+.pmgr-btn-primary {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 60%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 8px 22px -10px var(--color-accent);
+}
+
+/* Steady digit widths so live numbers do not jitter as they change. */
+.pmgr-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Quiet section labels, used above tables and grouped controls. */
+.pmgr-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+
+/* Home header card: a soft brand glow from the corner, static so it costs nothing to animate. */
+.pmgr-hero {
+  background-image:
+    radial-gradient(620px 240px at 0% 0%, rgba(var(--color-accent-rgb), 0.16), transparent 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 60%);
+}
+html[data-pmgr-theme="light"] .pmgr-hero {
+  background-image: radial-gradient(620px 240px at 0% 0%, rgba(var(--color-accent-rgb), 0.1), transparent 70%);
+}
+
+/* Console overview tiles: two across on small screens, then an even 3 or 4 column grid. */
+.pmgr-console-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (min-width: 900px) {
+  .pmgr-console-grid {
+    grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
+  }
+}
+
+
+/* Console browser profile. It has no GPU and no JIT, so every shadow, gradient and looping
+   animation is painted by the CPU on each frame; drop the ones that only add polish. */
+html.pmgr-ps5 * {
+  --tw-shadow: 0 0 #0000 !important;
+  --tw-shadow-colored: 0 0 #0000 !important;
+}
+html.pmgr-ps5 body {
+  text-rendering: auto;
+  -webkit-font-smoothing: auto;
+}
+html.pmgr-ps5 .pmgr-surface,
+html.pmgr-ps5 .pmgr-hero,
+html.pmgr-ps5 .pmgr-tile,
+html.pmgr-ps5 .pmgr-btn-primary,
+html.pmgr-ps5 .pmgr-power-btn {
+  background-image: none;
+  box-shadow: none;
+}
+html.pmgr-ps5 .pmgr-panel {
+  background: var(--color-panel);
+  box-shadow: none;
+}
+html.pmgr-ps5 .pmgr-live-dot,
+html.pmgr-ps5 .pmgr-skeleton {
+  animation: none;
+}
+
+/* Browsers without flex gap (the console's) get the same spacing from margins. */
+html.pmgr-no-flex-gap .flex.gap-0\.5 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-0\.5 > * + * {
+  margin-inline-start: 0.125rem;
+}
+html.pmgr-no-flex-gap .flex.gap-1 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-1 > * + * {
+  margin-inline-start: 0.25rem;
+}
+html.pmgr-no-flex-gap .flex.gap-1\.5 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-1\.5 > * + * {
+  margin-inline-start: 0.375rem;
+}
+html.pmgr-no-flex-gap .flex.gap-2 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-2 > * + * {
+  margin-inline-start: 0.5rem;
+}
+html.pmgr-no-flex-gap .flex.gap-2\.5 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-2\.5 > * + * {
+  margin-inline-start: 0.625rem;
+}
+html.pmgr-no-flex-gap .flex.gap-3 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-3 > * + * {
+  margin-inline-start: 0.75rem;
+}
+html.pmgr-no-flex-gap .flex.gap-4 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-4 > * + * {
+  margin-inline-start: 1rem;
+}
+html.pmgr-no-flex-gap .flex.gap-x-2 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-x-2 > * + * {
+  margin-inline-start: 0.5rem;
+}
+html.pmgr-no-flex-gap .flex.gap-x-3 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-x-3 > * + * {
+  margin-inline-start: 0.75rem;
+}
+html.pmgr-no-flex-gap .flex.gap-x-5 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-x-5 > * + * {
+  margin-inline-start: 1.25rem;
+}
+html.pmgr-no-flex-gap .flex.gap-x-6 > * + *,
+html.pmgr-no-flex-gap .inline-flex.gap-x-6 > * + * {
+  margin-inline-start: 1.5rem;
+}
+html.pmgr-no-flex-gap .flex-col.gap-0\.5:not([class*="flex-row"]) > * + *,
+html.pmgr-no-flex-gap .inline-flex.flex-col.gap-0\.5:not([class*="flex-row"]) > * + * {
+  margin-inline-start: 0;
+  margin-top: 0.125rem;
+}
+html.pmgr-no-flex-gap .flex-col.gap-1:not([class*="flex-row"]) > * + *,
+html.pmgr-no-flex-gap .inline-flex.flex-col.gap-1:not([class*="flex-row"]) > * + * {
+  margin-inline-start: 0;
+  margin-top: 0.25rem;
+}
+html.pmgr-no-flex-gap .flex-col.gap-1\.5:not([class*="flex-row"]) > * + *,
+html.pmgr-no-flex-gap .inline-flex.flex-col.gap-1\.5:not([class*="flex-row"]) > * + * {
+  margin-inline-start: 0;
+  margin-top: 0.375rem;
+}
+html.pmgr-no-flex-gap .flex-col.gap-2:not([class*="flex-row"]) > * + *,
+html.pmgr-no-flex-gap .inline-flex.flex-col.gap-2:not([class*="flex-row"]) > * + * {
+  margin-inline-start: 0;
+  margin-top: 0.5rem;
+}
+html.pmgr-no-flex-gap .flex-col.gap-2\.5:not([class*="flex-row"]) > * + *,
+html.pmgr-no-flex-gap .inline-flex.flex-col.gap-2\.5:not([class*="flex-row"]) > * + * {
+  margin-inline-start: 0;
+  margin-top: 0.625rem;
+}
+html.pmgr-no-flex-gap .flex-col.gap-3:not([class*="flex-row"]) > * + *,
+html.pmgr-no-flex-gap .inline-flex.flex-col.gap-3:not([class*="flex-row"]) > * + * {
+  margin-inline-start: 0;
+  margin-top: 0.75rem;
+}
+html.pmgr-no-flex-gap .flex-col.gap-4:not([class*="flex-row"]) > * + *,
+html.pmgr-no-flex-gap .inline-flex.flex-col.gap-4:not([class*="flex-row"]) > * + * {
+  margin-inline-start: 0;
+  margin-top: 1rem;
+}
+
+/* Images fade in once decoded instead of popping into the grid. */
+.pmgr-img-fade { opacity: 0; transition: opacity var(--motion-ui) var(--ease-out); }
+.pmgr-img-fade.is-loaded { opacity: 1; }
+
+/* Banners and action bars drop in softly rather than appearing at full strength. */
+@keyframes pmgr-notice-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.pmgr-notice-in { animation: pmgr-notice-in var(--motion-ui) var(--ease-snappy) both; }
+
+html.pmgr-ps5 .pmgr-img-fade,
+.pmgr-low-power .pmgr-img-fade { opacity: 1; transition: none; }
+html.pmgr-ps5 .pmgr-notice-in,
+.pmgr-low-power .pmgr-notice-in { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .pmgr-img-fade { opacity: 1; transition: none; }
+  .pmgr-notice-in { animation: none; }
+}
+
+/* Filter tabs compress slightly on press, like the other controls. */
+.pmgr-seg { transition: color var(--motion-fast) ease, background-color var(--motion-fast) ease, transform var(--motion-instant) ease; }
+.pmgr-seg:active { transform: scale(0.96); }
+html.pmgr-ps5 .pmgr-seg:active,
+.pmgr-low-power .pmgr-seg:active { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .pmgr-seg { transition: none; }
+  .pmgr-seg:active { transform: none; }
+}
+
+
+/* The console's browser reports a few pixels of horizontal overflow here that the table does not have. */
+html.pmgr-ps5 .pmgr-file-scroll { overflow-x: hidden; }
+
+/* Compact file rows: the 44px touch targets shrink so more files fit on a screen. */
+.pmgr-files-compact td { padding-top: 6px; padding-bottom: 6px; }
+.pmgr-files-compact .pmgr-icon-btn { height: 36px; width: 36px; padding: 0; }
+.pmgr-files-compact .pmgr-game-cover { height: 36px; width: 36px; }
+.pmgr-files-compact .pmgr-col-mode { display: none; }

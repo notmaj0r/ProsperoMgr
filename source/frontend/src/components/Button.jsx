@@ -2,7 +2,7 @@
 // button className, which is why they all felt cramped. Bigger default touch target, optional icon.
 
 const TONES = {
-  primary: 'border border-accent/60 bg-accent text-white shadow-[0_8px_22px_-10px_var(--color-accent)] hover:bg-accent-hover',
+  primary: 'pmgr-btn-primary border border-accent/60 bg-accent text-white hover:bg-accent-hover',
   neutral: 'border border-panel-border bg-panel-2 text-text hover:border-accent/35 hover:bg-panel-border',
   danger: 'border border-err/25 bg-err/10 text-err hover:border-err/45 hover:bg-err/20',
   warn: 'border border-warn/60 bg-warn text-black shadow-[0_8px_22px_-12px_var(--color-warn)] hover:brightness-105',

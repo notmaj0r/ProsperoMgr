@@ -15,6 +15,8 @@
 #include <thread>
 #include <vector>
 
+#include "upload_writer.hpp"
+
 namespace prospero {
 
 // Pull-based response body for transfers that must not be staged on disk or buffered in
@@ -34,6 +36,7 @@ struct HttpRequest {
     std::string body_file;
     uint64_t body_size = 0;
     std::map<std::string, std::string> query; // ?key=value GET arguments
+    std::string range;                        // Range header, for media players that seek
     // Set when the connection was accepted, before any body bytes arrived — (now -
     // received_at) spans the receive phase. Only used by net-sink debug routes.
     std::chrono::steady_clock::time_point received_at;
@@ -120,13 +123,13 @@ class HttpServer {
         std::string body;
         std::string body_file;
         int upload_fd = -1;
-        std::vector<char> upload_buffer;
-        size_t upload_buffer_used = 0;
+        std::unique_ptr<UploadWriter> upload_writer; // created with the first bytes of a streamed upload
         uint64_t body_size = 0;
         uint64_t max_body_size = 0;
         bool streamed = false;
         bool direct_upload = false;
         bool preserve_body_file = false;
+        bool in_place_upload = false; // body_file is the final destination, not a staging file
         bool discard_upload = false;
         bool count_only = false; // CountingUploadRoute — bytes are counted, never written anywhere
         std::chrono::steady_clock::time_point received_at = std::chrono::steady_clock::now();

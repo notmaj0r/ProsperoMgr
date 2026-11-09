@@ -48,6 +48,8 @@ constexpr int kSystemUserId = 0xFE; // SCE_NOTIFICATION_LOCAL_USER_ID_SYSTEM
 struct QueuedToast {
     std::string message;
     bool rich;
+    std::string icon_path; // empty: our own app icon
+    std::string action_name, action_url; // optional button that opens action_url
 };
 
 std::mutex g_mu;
@@ -111,21 +113,28 @@ std::string IsoTimestampUtc() {
 
 // Sony's InteractiveToastTemplateB schema, sent through sceNotificationSend to get a
 // real app icon on the toast.
-bool SendRichToast(const std::string &message) {
+bool SendRichToast(const std::string &message, const std::string &icon_path, const std::string &action_name = "",
+                   const std::string &action_url = "") {
     if (!EnsureIconOnDisk()) {
         LogEvent("[notify] could not write notification icon, falling back to plain toast");
         return false;
     }
     // Omitting soundEffect is what lets the default toast sound play; setting it to
     // "none" mutes the toast.
+    std::string actions;
+    if (!action_url.empty()) {
+        actions = ",\"actions\":[{\"actionName\":\"" + JsonEscape(action_name) +
+                  "\",\"actionType\":\"DeepLink\",\"defaultFocus\":true,\"parameters\":{\"actionUrl\":\"" +
+                  JsonEscape(action_url) + "\"}}]";
+    }
     std::string payload =
         "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTemplateB\","
         "\"channelType\":\"ServiceFeedback\",\"bundleName\":\"ProsperoMgr\","
         "\"useCaseId\":\"IDC\","
         "\"toastOverwriteType\":\"InQueue\",\"isImmediate\":true,\"priority\":100,"
         "\"viewData\":{\"icon\":{\"type\":\"Url\",\"parameters\":{\"url\":\"" +
-        std::string(kIconPath) + "\"}},\"message\":{\"body\":\"" + JsonEscape(message) +
-        "\"}}},\"createdDateTime\":\"" + IsoTimestampUtc() + "\",\"localNotificationId\":\"" +
+        (icon_path.empty() ? std::string(kIconPath) : icon_path) + "\"}},\"message\":{\"body\":\"" + JsonEscape(message) +
+        "\"}" + actions + "}},\"createdDateTime\":\"" + IsoTimestampUtc() + "\",\"localNotificationId\":\"" +
         std::to_string((static_cast<uint32_t>(std::time(nullptr))) ^ static_cast<uint32_t>(getpid())) + "\"}";
     int rc = sceNotificationSend(kSystemUserId, true, payload.c_str());
     // Once per session: tells a rejected toast apart from one the system accepted
@@ -164,12 +173,15 @@ void *NotifierLoop(void *) {
             toast = std::move(g_queue.front());
             g_queue.pop_front();
         }
-        if (!toast.rich || !SendRichToast(toast.message)) SendPlainToast(toast.message);
+        if (!toast.rich || !SendRichToast(toast.message, toast.icon_path, toast.action_name, toast.action_url)) {
+            SendPlainToast(toast.message);
+        }
     }
     return nullptr;
 }
 
-void QueueToast(const std::string &message, bool rich) {
+void QueueToast(const std::string &message, bool rich, const std::string &icon_path = "",
+                const std::string &action_name = "", const std::string &action_url = "") {
     std::lock_guard<std::mutex> lock(g_mu);
     if (!g_started) {
         g_started = true;
@@ -183,7 +195,7 @@ void QueueToast(const std::string &message, bool rich) {
     }
     // Drop the oldest rather than grow without bound if the syscall wedges.
     if (g_queue.size() >= kMaxQueued) g_queue.pop_front();
-    g_queue.push_back({message, rich});
+    g_queue.push_back({message, rich, icon_path, action_name, action_url});
     g_cv.notify_one();
 }
 
@@ -192,5 +204,32 @@ void QueueToast(const std::string &message, bool rich) {
 void Notify(const std::string &message) { QueueToast(message, /*rich=*/true); }
 
 void NotifyDebug(const std::string &message) { QueueToast(message, /*rich=*/false); }
+
+void NotifyWithAction(const std::string &message, const std::string &action_name, const std::string &action_url) {
+    QueueToast(message, /*rich=*/true, "", action_name, action_url);
+}
+
+void NotifyWithImage(const std::string &message, const std::string &png) {
+    static unsigned counter = 0;
+    static std::string previous;
+    if (png.empty() || !EnsureIconOnDisk()) {
+        Notify(message);
+        return;
+    }
+    // A new name each time, so the notification service never shows an older cover from its cache.
+    std::string path = std::string(kIconDir) + "/cover-" + std::to_string(++counter) + ".png";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(png.data(), static_cast<std::streamsize>(png.size()));
+        if (!out.good()) {
+            Notify(message);
+            return;
+        }
+    }
+    chmod(path.c_str(), 0644);
+    if (!previous.empty()) std::remove(previous.c_str());
+    previous = path;
+    QueueToast(message, /*rich=*/true, path);
+}
 
 } // namespace prospero

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import EmojiText from './EmojiText.jsx'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useDismiss } from '../lib/useDismiss.js'
 import { copyText } from '../lib/clipboard.js'
@@ -16,7 +17,7 @@ const CRYPTO = [
   { label: 'USDT (TON)', addr: 'UQA18f4cVS0778fL_nIssdN1GIHRYR7dQ3UnNgjPwgYvIQi_' },
 ]
 
-const SUPPORTERS = ['Vinas', 'Someone', 'Bruno Sanglard', 'AirKingBR', 'Marcus', 'Jeffs', 'cavalcanti27', 'Maffioh']
+const SUPPORTERS = ['Vinas', 'Someone', 'Bruno Sanglard', 'AirKingBR', 'Marcus', 'Jeffs', 'cavalcanti27', 'Maffioh', 'PCYGOR', 'Lucas Clinio Maraia', 'primo', 'lal3x', 'jawad', 'anonymous', 'X-F1REBALL-X', 'Br0ken4life', 'Nimrod', 'I gave a tip!', 'johnfugate', 'Loxias', 'Shambhala222', 'Zahir Tarafder', 'Wender', 'Heymimd', 'Android_Loads', 'LOCATELLI', 'Tiago G DE LIRA', 'Giih77777', 'mvlira', 'PauloSantos', 'Waleed', 'Doubleq', 'gas17', 'PS5FOREVA', 'thiagodalsoto', 'Thiago_Dark', 'Jeffeerson REC']
 
 export default function SupportModal({ onClose }) {
   const { t } = useI18n()
@@ -40,13 +41,13 @@ export default function SupportModal({ onClose }) {
         aria-modal="true"
         aria-label={t(view === 'main' ? 'support.title' : 'support.cryptoTitle')}
         tabIndex={-1}
-        className={`pmgr-support-modal pmgr-panel pmgr-modal-pop w-full max-w-lg overflow-hidden rounded-2xl border border-panel-border ${closing ? 'is-closing' : ''}`}
+        className={`pmgr-support-modal pmgr-panel pmgr-modal-pop pmgr-max-h-dvh-85 w-full max-w-lg overflow-y-auto rounded-2xl border border-panel-border ${closing ? 'is-closing' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         {view === 'main' ? (
           <>
             <div className="pmgr-support-hero relative overflow-hidden px-6 pb-5 pt-6 text-center">
-              <button type="button" onClick={close} aria-label={t('common.close')} className="pmgr-support-close pmgr-icon-btn absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-full text-text-dim hover:text-text">
+              <button type="button" onClick={close} aria-label={t('common.close')} className="pmgr-support-close pmgr-icon-btn !absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-full text-text-dim hover:text-text">
                 <CloseIcon size={16} />
               </button>
               <div className="pmgr-support-heart mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl text-white">
@@ -54,7 +55,7 @@ export default function SupportModal({ onClose }) {
               </div>
               <h2 className="text-xl font-black tracking-tight text-text">{t('support.title')}</h2>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-text-dim">
-                {t('support.desc')}
+                <EmojiText text={t('support.desc')} />
               </p>
               <p className="mx-auto mt-2 max-w-sm text-xs leading-relaxed text-text-dim">
                 {t('support.goal')}
@@ -106,8 +107,8 @@ export default function SupportModal({ onClose }) {
                 {t('settings.supporters')}
               </div>
               <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
-                {SUPPORTERS.map((name) => (
-                  <span key={name} className="pmgr-supporter-name font-mono text-sm">{name}</span>
+                {SUPPORTERS.map((name, index) => (
+                  <span key={name} className="pmgr-supporter-name font-mono text-sm" style={{ animationDelay: `${-(index * 3) / SUPPORTERS.length}s` }}>{name}</span>
                 ))}
               </div>
             </div>

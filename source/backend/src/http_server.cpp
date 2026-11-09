@@ -34,8 +34,8 @@ namespace {
 // request fails predictably instead of growing until allocation fails.
 constexpr size_t kMaxBodyBytes = 1024u * 1024;
 
-// MHD hands upload data over in small fragments. Batch them into
-// storage-sized writes instead of hitting the filesystem per fragment.
+// MHD hands upload data over in small fragments. Batch them into storage-sized
+// writes, which the upload writer then flushes on its own thread.
 constexpr size_t kUploadWriteChunk = 2 * 1024u * 1024u;
 
 // Also the size FileReadStream reads in (api_routes.cpp) — keep both in
@@ -53,6 +53,8 @@ constexpr int kAcceptedSndBuf = 4 * 1024 * 1024;
 // Sync only on the chunk that finishes the file or crosses this boundary,
 // not every chunk — bounds how much a crash could lose either way.
 constexpr uint64_t kUploadSyncCheckpoint = 256ull * 1024ull * 1024ull;
+constexpr uint64_t kSmallFileSyncBytes = 8ull * 1024ull * 1024ull;
+constexpr uint64_t kInPlaceUploadBytes = 32ull * 1024ull * 1024ull;
 
 ssize_t ReadResponseStream(void *cls, uint64_t position, char *buffer, size_t max_bytes) noexcept {
     auto *stream = static_cast<std::shared_ptr<HttpBodyStream> *>(cls);
@@ -85,20 +87,6 @@ bool SafeUploadId(const char *text) {
     if (!text || !*text || std::strlen(text) > 64) return false;
     for (const unsigned char c : std::string(text)) {
         if (!std::isalnum(c) && c != '-' && c != '_') return false;
-    }
-    return true;
-}
-
-bool WriteAll(int fd, const char *data, size_t size) {
-    size_t written = 0;
-    while (written < size) {
-        ssize_t rc = write(fd, data + written, size - written);
-        if (rc > 0) {
-            written += static_cast<size_t>(rc);
-            continue;
-        }
-        if (rc < 0 && errno == EINTR) continue;
-        return false;
     }
     return true;
 }
@@ -259,6 +247,7 @@ HttpServer::HttpServer(uint16_t port) : port_(port) {}
 HttpServer::~HttpServer() { Stop(); }
 
 HttpServer::ConnState::~ConnState() {
+    upload_writer.reset(); // the writer thread must be gone before its fd closes
     if (upload_fd >= 0) close(upload_fd);
     if (!preserve_body_file && !body_file.empty()) std::remove(body_file.c_str());
     if (!upload_reservation_path.empty()) {
@@ -269,38 +258,13 @@ HttpServer::ConnState::~ConnState() {
 
 bool HttpServer::AppendUpload(ConnState *state, const char *data, size_t size) {
     if (!state || state->upload_fd < 0) return false;
-    if (state->upload_buffer.empty()) state->upload_buffer.resize(kUploadWriteChunk);
-
-    while (size > 0) {
-        // Avoid an extra copy when MHD does hand us one or more complete
-        // storage chunks and there is no partial chunk pending.
-        if (state->upload_buffer_used == 0 && size >= kUploadWriteChunk) {
-            size_t direct = size - (size % kUploadWriteChunk);
-            if (!WriteAll(state->upload_fd, data, direct)) return false;
-            data += direct;
-            size -= direct;
-            continue;
-        }
-
-        size_t take = std::min(size, kUploadWriteChunk - state->upload_buffer_used);
-        std::memcpy(state->upload_buffer.data() + state->upload_buffer_used, data, take);
-        state->upload_buffer_used += take;
-        data += take;
-        size -= take;
-        if (state->upload_buffer_used == kUploadWriteChunk) {
-            if (!WriteAll(state->upload_fd, state->upload_buffer.data(), state->upload_buffer_used)) return false;
-            state->upload_buffer_used = 0;
-        }
-    }
-    return true;
+    if (!state->upload_writer) state->upload_writer = std::make_unique<UploadWriter>(state->upload_fd, kUploadWriteChunk);
+    return state->upload_writer->Append(data, size);
 }
 
 bool HttpServer::FlushUpload(ConnState *state) {
     if (!state || state->upload_fd < 0) return false;
-    if (state->upload_buffer_used == 0) return true;
-    if (!WriteAll(state->upload_fd, state->upload_buffer.data(), state->upload_buffer_used)) return false;
-    state->upload_buffer_used = 0;
-    return true;
+    return !state->upload_writer || state->upload_writer->Flush();
 }
 
 void HttpServer::Route(const std::string &method, const std::string &path, RouteHandler handler) {
@@ -373,6 +337,11 @@ class FdBodyStream final : public HttpBodyStream {
 };
 
 // A few GETs are real user actions rather than polling, so they get logged too.
+// Routes that take thousands of requests in one transfer: one socket, and no log line per request.
+bool IsBulkUpload(const std::string &url) {
+    return url == "/api/ftp/upload/chunk" || url == "/api/pkg/live/segment";
+}
+
 bool IsLoggedGet(const std::string &url) {
     return url == "/api/payloads/download" || url == "/api/catalog/refresh";
 }
@@ -397,6 +366,8 @@ std::string ActionDetail(const HttpRequest &req) {
 // idle costs nothing — see LogEvent for why volume matters here.
 void LogUserAction(const HttpRequest &req, const HttpResponse &resp) {
     if (req.method == "GET" && !IsLoggedGet(req.url)) return;
+    // The upload route logs each finished file itself.
+    if (IsBulkUpload(req.url) && resp.status < 300) return;
     long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
                                                                     req.received_at)
                   .count();
@@ -461,8 +432,10 @@ MHD_Result HttpServer::OnRequestImpl(void *cls, MHD_Connection *conn, const char
             std::string pattern;
             if (!route->second.upload_target_query.empty()) {
                 state->direct_upload = true;
-                const char *target = MHD_lookup_connection_value(
+                const char *target_raw = MHD_lookup_connection_value(
                     conn, MHD_GET_ARGUMENT_KIND, route->second.upload_target_query.c_str());
+                std::string target_path = target_raw ? NameFromUtf8(target_raw) : "";
+                const char *target = target_raw ? target_path.c_str() : nullptr;
                 if (!target || target[0] != '/' || std::strstr(target, "/../") ||
                     (std::strlen(target) >= 3 && std::strcmp(target + std::strlen(target) - 3, "/..") == 0)) {
                     state->write_error = "upload destination must be a valid absolute path";
@@ -511,25 +484,45 @@ MHD_Result HttpServer::OnRequestImpl(void *cls, MHD_Connection *conn, const char
                                 state->preserve_body_file = true;
                                 state->discard_upload = true;
                             } else if ((partial_exists && (current.st_size < 0 ||
-                                                           static_cast<uint64_t>(current.st_size) != offset)) ||
+                                                           static_cast<uint64_t>(current.st_size) < offset)) ||
                                        (!partial_exists && offset != 0)) {
                                 state->write_error = "upload offset does not match the saved checkpoint";
                             } else {
+                                // A small file sent in one request skips the staging file and the rename.
+                                const char *overwrite_text = MHD_lookup_connection_value(
+                                    conn, MHD_GET_ARGUMENT_KIND, "overwrite");
+                                bool in_place = offset == 0 && content_length == total && total <= kInPlaceUploadBytes &&
+                                                !partial_exists && !(overwrite_text && overwrite_text[0] == '1');
                                 int flags = O_CREAT | O_WRONLY;
-                                if (offset == 0) flags |= O_TRUNC;
-                                int fd = open(partial.c_str(), flags, 0666);
-                                if (fd < 0 || lseek(fd, static_cast<off_t>(offset), SEEK_SET) < 0) {
+                                if (in_place) flags |= O_EXCL;
+                                else if (offset == 0) flags |= O_TRUNC;
+                                int fd = open(in_place ? target : partial.c_str(), flags, 0666);
+                                bool exists = fd < 0 && in_place && errno == EEXIST;
+                                // A retry after a stalled chunk drops the bytes that attempt left behind.
+                                if (fd >= 0 && partial_exists && static_cast<uint64_t>(current.st_size) > offset &&
+                                    ftruncate(fd, static_cast<off_t>(offset)) != 0) {
+                                    close(fd);
+                                    fd = -1;
+                                }
+                                if (exists) {
+                                    state->write_error = "destination already exists";
+                                    state->write_error_status = 409;
+                                } else if (fd < 0 || lseek(fd, static_cast<off_t>(offset), SEEK_SET) < 0) {
                                     if (fd >= 0) close(fd);
                                     state->write_error = "could not open resumable upload checkpoint";
                                 } else {
-                                    state->body_file = partial;
-                                    state->preserve_body_file = true;
+                                    state->body_file = in_place ? target : partial;
+                                    // A failed request removes the half-written file.
+                                    state->preserve_body_file = !in_place;
+                                    state->in_place_upload = in_place;
                                     state->upload_fd = fd;
                                     uint64_t new_size = offset + content_length;
                                     bool completes_file = new_size == total;
                                     bool crosses_checkpoint =
                                         new_size / kUploadSyncCheckpoint > offset / kUploadSyncCheckpoint;
-                                    state->sync_on_finalize = completes_file || crosses_checkpoint;
+                                    // Small files skip the flush; the client asks for one sync after the batch.
+                                    state->sync_on_finalize =
+                                        (completes_file && total >= kSmallFileSyncBytes) || crosses_checkpoint;
                                 }
                             }
                         }
@@ -599,6 +592,7 @@ MHD_Result HttpServer::OnRequestImpl(void *cls, MHD_Connection *conn, const char
             state->body.clear();
             state->body.shrink_to_fit();
             if (state->upload_fd >= 0) {
+                state->upload_writer.reset();
                 close(state->upload_fd);
                 state->upload_fd = -1;
             }
@@ -690,12 +684,13 @@ MHD_Result HttpServer::OnRequestImpl(void *cls, MHD_Connection *conn, const char
     req.body_file = state->body_file;
     req.body_size = state->body_size;
     req.received_at = state->received_at;
+    if (const char *range = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Range")) req.range = range;
 
     MHD_get_connection_values(
         conn, MHD_GET_ARGUMENT_KIND,
         [](void *cls, MHD_ValueKind, const char *key, const char *value) -> MHD_Result {
             auto *q = static_cast<std::map<std::string, std::string> *>(cls);
-            (*q)[key] = value ? value : "";
+            (*q)[key] = value ? NameFromUtf8(value) : "";
             return MHD_YES;
         },
         &req.query);
@@ -713,6 +708,7 @@ MHD_Result HttpServer::OnRequestImpl(void *cls, MHD_Connection *conn, const char
         resp = HttpResponse::Error("internal error", 500);
     }
     idle_persistent_upload();
+    if (state->in_place_upload && resp.status < 300) state->preserve_body_file = true;
     LogUserAction(req, resp);
 
     MHD_Response *mhd_resp = nullptr;
@@ -752,9 +748,10 @@ MHD_Result HttpServer::OnRequestImpl(void *cls, MHD_Connection *conn, const char
     }
     if (!mhd_resp) return MHD_NO;
     MHD_add_response_header(mhd_resp, MHD_HTTP_HEADER_CONTENT_TYPE, resp.content_type.c_str());
-    // The PS5 browser holds idle HTTP/1.1 sockets open too long, so one response per
-    // socket keeps its small connection pool bounded.
-    MHD_add_response_header(mhd_resp, MHD_HTTP_HEADER_CONNECTION, "close");
+    // The PS5 browser keeps idle sockets too long, so each response closes its socket.
+    // Upload chunks are the exception: a new socket per file costs more than the write.
+    bool keep_alive = IsBulkUpload(req.url) && resp.status < 300;
+    if (!keep_alive) MHD_add_response_header(mhd_resp, MHD_HTTP_HEADER_CONNECTION, "close");
     for (const auto &[name, value] : resp.extra_headers) {
         MHD_add_response_header(mhd_resp, name.c_str(), value.c_str());
     }

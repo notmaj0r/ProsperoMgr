@@ -16,6 +16,7 @@ import flagItIT from '../assets/flags/it-IT.svg'
 import flagJaJP from '../assets/flags/ja-JP.svg'
 import flagKoKR from '../assets/flags/ko-KR.svg'
 import flagFaIR from '../assets/flags/fa-IR.svg'
+import flagHuHU from '../assets/flags/hu-HU.svg'
 import flagPlPL from '../assets/flags/pl-PL.svg'
 import flagPtBR from '../assets/flags/pt-BR.svg'
 import flagRuRU from '../assets/flags/ru-RU.svg'
@@ -34,6 +35,7 @@ export const LOCALES = [
   { id: 'ja-JP', flag: flagJaJP, name: '日本語' },
   { id: 'ko-KR', flag: flagKoKR, name: '한국어' },
   { id: 'fa-IR', flag: flagFaIR, name: 'فارسی' },
+  { id: 'hu-HU', flag: flagHuHU, name: 'Magyar' },
   { id: 'pl-PL', flag: flagPlPL, name: 'Polski' },
   { id: 'pt-BR', flag: flagPtBR, name: 'Português (Brasil)' },
   { id: 'ru-RU', flag: flagRuRU, name: 'Русский' },
@@ -55,6 +57,7 @@ const LOCALE_LOADERS = {
   'ja-JP': () => import('../locales/ja-JP.json'),
   'ko-KR': () => import('../locales/ko-KR.json'),
   'fa-IR': () => import('../locales/fa-IR.json'),
+  'hu-HU': () => import('../locales/hu-HU.json'),
   'pl-PL': () => import('../locales/pl-PL.json'),
   'pt-BR': () => import('../locales/pt-BR.json'),
   'ru-RU': () => import('../locales/ru-RU.json'),

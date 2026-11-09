@@ -2,9 +2,39 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useI18n } from '../lib/i18n.jsx'
 
+// dataTransfer.files lists a dropped folder as one empty entry, so walk the entries and
+// tag each file with its path inside the folder (e.g. TESTE/TESTE1.txt).
+const readAll = (reader) => new Promise((resolve, reject) => {
+  const found = []
+  const next = () => reader.readEntries((batch) => {
+    if (!batch.length) resolve(found)
+    else { found.push(...batch); next() }
+  }, reject)
+  next()
+})
+
+async function walkEntry(entry, prefix, out) {
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+    if (prefix) Object.defineProperty(file, 'relativePath', { value: prefix + file.name })
+    out.push(file)
+    return
+  }
+  for (const child of await readAll(entry.createReader())) await walkEntry(child, `${prefix}${entry.name}/`, out)
+}
+
+async function collectDropped(dataTransfer) {
+  const items = Array.from(dataTransfer.items || [])
+  const entries = items.map((item) => item.webkitGetAsEntry?.()).filter(Boolean)
+  if (!entries.length) return Array.from(dataTransfer.files || [])
+  const out = []
+  for (const entry of entries) await walkEntry(entry, '', out)
+  return out
+}
+
 // Wraps content with drag-and-drop file handling. Used by FtpView (upload
 // to current path) and PayloadsView (import a .elf) — same drop UX both places.
-export default function DropZone({ onFiles, children, className = '', global = false, label }) {
+export default function DropZone({ onFiles, children, className = '', global = false, enabled = true, label }) {
   const { t } = useI18n()
   const effectiveLabel = label ?? t('files.dropDefault')
   const [active, setActive] = useState(false)
@@ -16,7 +46,7 @@ export default function DropZone({ onFiles, children, className = '', global = f
     Array.from(event.dataTransfer?.types || []).includes('Files') || (event.dataTransfer?.files?.length || 0) > 0
 
   useEffect(() => {
-    if (!global) return undefined
+    if (!global || !enabled) return undefined
 
     const enter = (event) => {
       if (!hasFiles(event)) return
@@ -39,8 +69,9 @@ export default function DropZone({ onFiles, children, className = '', global = f
       setActive(false)
       if (!hasFiles(event)) return
       event.preventDefault()
-      const files = Array.from(event.dataTransfer?.files || [])
-      if (files.length) onFilesRef.current(files)
+      collectDropped(event.dataTransfer).then((files) => {
+        if (files.length) onFilesRef.current(files)
+      })
     }
     // Close in capture phase; the bubble handler is the only upload target, so a
     // row under the cursor can't change the destination.
@@ -62,14 +93,15 @@ export default function DropZone({ onFiles, children, className = '', global = f
       window.removeEventListener('dragend', resetDropUi)
       window.removeEventListener('blur', resetDropUi)
     }
-  }, [global])
+  }, [global, enabled])
 
   const onDrop = (e) => {
     e.preventDefault()
     dragDepth.current = 0
     setActive(false)
-    const files = Array.from(e.dataTransfer.files || [])
-    if (files.length) onFiles(files)
+    collectDropped(e.dataTransfer).then((files) => {
+      if (files.length) onFiles(files)
+    })
   }
 
   return (

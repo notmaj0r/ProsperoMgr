@@ -46,6 +46,7 @@ bool NativeDirectorySize(const std::string &path, uint64_t *out_size, std::strin
 bool CreateNativeDirectory(const std::string &path, std::string *err);
 bool DeleteNativePath(const std::string &path, std::string *err);
 bool SetNativePermissions(const std::string &path, uint32_t mode, std::string *err);
+bool SetNativePermissionsTree(const std::string &path, uint32_t mode, std::string *err);
 // Non-following POSIX tree removal used by background staging cleanup too — unlike libc++
 // remove_all on Orbis, won't misclassify files as dirs or follow symlinks. Callers own root policy.
 bool RemoveNativeTree(const std::string &path, std::string *err);

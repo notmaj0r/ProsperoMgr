@@ -14,6 +14,7 @@
 #include "log.hpp"
 #include "miniz.h"
 #include "notify.hpp"
+#include "notify_text.hpp"
 
 namespace prospero {
 
@@ -112,7 +113,7 @@ void InstallTilePkgIfNeeded(const Config &cfg) {
         int rc = sceAppInstUtilAppInstallPkg(sdk_path.c_str(), &info);
         if (rc == 0) {
             LogEvent("tile PKG: home-screen tile installed");
-            Notify("Prospero Manager\nPKG installed");
+            Notify("Prospero Manager\n" + NotifyText(Msg::kPkgInstalled));
             return;
         }
         std::snprintf(buf, sizeof(buf), "tile PKG: AppInstallPkg failed rc=0x%08x — trying InstallByPackage",
@@ -134,7 +135,7 @@ void InstallTilePkgIfNeeded(const Config &cfg) {
         int rc2 = sceAppInstUtilInstallByPackage(&meta, &info2, &playgo);
         if (rc2 == 0) {
             LogEvent("tile PKG: home-screen tile installed");
-            Notify("Prospero Manager\nPKG installed");
+            Notify("Prospero Manager\n" + NotifyText(Msg::kPkgInstalled));
         } else {
             std::snprintf(buf, sizeof(buf), "tile PKG: install failed: AppInstallPkg rc=0x%08x, InstallByPackage rc=0x%08x",
                           static_cast<unsigned>(rc), static_cast<unsigned>(rc2));

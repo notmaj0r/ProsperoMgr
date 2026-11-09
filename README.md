@@ -24,10 +24,12 @@ No desktop client is required. Send `ProsperoMgr.elf` to the console, open the P
 
 Prospero brings the most common PS5 homebrew-management workflows together in one interface:
 
-- Browse and manage PS5 storage;
+- Browse and manage PS5 storage, and safely remove USB drives;
 - Upload and download large files;
 - Create, inspect, download, and extract ZIP archives — extract RAR archives too, including password-protected ones;
 - Preview images without downloading them;
+- Browse the game and app library, and launch games, apps and homebrew;
+- Browse, view, download and delete screenshots and clips;
 - Manage and launch payloads;
 - Browse community payload repositories and track new releases;
 - Install PKG files, including several at once queued in sequence;
@@ -55,24 +57,30 @@ Screenshots can be added here later, for example:
 
 ## ✨ Features
 
-- **Native file manager** — browse internal, USB, and extended storage; upload, download, rename, copy, move, delete, multi-select, keyboard navigation, and run long operations as background jobs.
+- **Native file manager** — browse internal, USB, and extended storage; upload, download, rename, copy, move, delete, multi-select, keyboard navigation, right-click menus, file-type icons, size and date filters, comfortable or compact rows, folder bookmarks, game folders (found by their `sce_sys` metadata, whatever the name) and `.exfat` images (read from inside the image) shown with their name and cover, Back/Forward through the folders you visited, safe removal of USB drives, and long operations as background jobs.
+- **Game and app library** — Home lists installed games and, in a separate tab, apps and homebrew, with covers, versions, sizes, play time, launch, and uninstall.
+- **Media** — the console's screenshots and clips grouped into albums by game, with a viewer, download (one file or one ZIP), and delete.
 - **High-speed transfers** — adaptive resumable uploads, large streamed downloads, PS5-specific socket/file-transfer tuning, and browser-friendly transfer handling.
 - **Archive tools** — streamed and cancelable ZIP creation/extraction, RAR extraction (including password-protected archives), live per-file progress, multiple compression modes, archive inspection, temporary **Download as ZIP**, conflict handling with replace/skip/keep-both, and ZIP Slip/path-traversal protection.
 - **Image preview** — view PNG, JPG, GIF, BMP, and WEBP files without downloading them.
-- **Payload library** — upload and manage local payloads, favorites, enable/disable state, launch/stop actions, and separate visibility for payload-like processes started outside Prospero.
-- **Payload Repositories** — curated community projects grouped by developer, latest-release checks, custom repositories, and direct links to the real upstream GitHub/Gitea project pages.
-- **PKG installer** — install `.pkg` files from PS5 storage, USB/extended storage, a direct URL, or streamed straight from your PC/phone with no temporary copy on the console; queue several packages to install one after another.
+- **Payload library** — upload and manage local payloads, favorites, enable/disable state, launch/stop actions, and separate visibility for payload-like processes started outside Prospero. The whole card launches the payload.
+- **Payload Repositories** — curated community projects grouped by developer, latest-release checks, custom repositories, downloading a chosen release into the payload library, and direct links to the real upstream GitHub/Gitea project pages.
+- **PKG installer** — install `.pkg` files from PS5 storage, USB/extended storage, a direct URL, or streamed straight from your PC/phone with no temporary copy on the console; review what each package is and whether it fits before installing, and queue several to install one after another.
 - **Save data** — manual per-title backups, downloadable archives, restore flows, and an optional automatic per-title backup watcher.
 - **Payload Autoloader** — configurable boot sequence with autosave, delays, retries, notifications, and a same-boot guard that prevents duplicate automatic launches after redeploying `ProsperoMgr.elf`.
 - **Process manager** — inspect running processes and stop supported processes when needed.
+- **Power menu** — standby, reboot, or shut down from the header power button, or schedule any of them after a delay (your own minutes) or when all jobs finish.
 - **Thermal controls** — live CPU/SoC/M.2 telemetry and fan-threshold controls when the required environment is available.
 - **Accounts (Experimental)** — selected offline account operations with explicit confirmation and automatic backup safeguards.
 - **Profile tools** — change the foreground user's display name and apply a custom avatar.
-- **16 Languages** — complete UI translation with locale-aware formatting and RTL support for Arabic and Persian.
+- **17 Languages** — complete UI translation with locale-aware formatting and RTL support for Arabic and Persian.
 - **Responsive interface** — designed for desktop, tablets, and smartphones.
+- **Transfer queue** — pause, reorder, and cancel queued file jobs, and cancel PKG installs, from the activity panel.
+- **Auto-updates** — checks GitHub releases and updates itself when the console is idle (can be turned off).
+- **Phone access** — a QR code on Home opens Prospero Manager on your phone.
 - **Command palette** — quick keyboard navigation with `Ctrl/Cmd + K`.
 - **Background activity** — persistent progress for transfers, archives, PKG operations, and Autoloader jobs.
-- **Native PS5 notifications** — startup, Autoloader, and job-completion feedback directly on the console.
+- **Native PS5 notifications** — startup, Autoloader, save-backup, install, and update feedback directly on the console, in the console's system language.
 
 ---
 
@@ -140,7 +148,11 @@ It supports:
 - Download as ZIP;
 - Background file jobs;
 - Progress, speed, and cancellation for long-running operations;
-- Keyboard navigation — arrow keys, Enter, F2 to rename, Delete to remove;
+- Keyboard navigation — arrow keys, Enter, F2 to rename, Delete to remove, and right-click for the same menu as the three-dot button;
+- Comfortable or compact rows, with a button in the toolbar (compact rows show the date only and hide permissions);
+- Game folders (`PPSA01234`, `PPSA01234-app0`, ...) shown with the game's name and cover;
+- Back and Forward between the folders you visited, including a mouse's side buttons;
+- Safe removal of USB drives through the console's own USB service;
 - Responsive layouts for desktop and mobile devices.
 
 Large uploads use resumable chunking so a long transfer does not need to restart from zero after a recoverable interruption.
@@ -212,7 +224,7 @@ It supports:
 
 - Drag-and-drop upload;
 - Importing payloads from the PS5 filesystem;
-- Search and filters;
+- Search, shown when there are many payloads;
 - Favorites;
 - Enable/disable state;
 - Bundled and user-added payloads;
@@ -224,7 +236,7 @@ Payload-like processes that are already running but are not registered in Prospe
 
 The payloads directory itself is configurable from `Settings → General → Payloads directory` — point it at a folder already used by another homebrew manager instead of keeping a separate copy of every payload. Takes effect after restarting `ProsperoMgr.elf`.
 
-Subdirectories are scanned too, so Payload Manager's `/data/pldmgr/payloads/<name>/<name>.elf` layout can be used directly without importing or copying files. Payloads are still identified by filename: a file in the root takes precedence over nested copies with the same filename; otherwise the first path in lexicographic order is used. Renaming or deleting a shared payload changes the original file used by the other manager.
+Payloads installed by Payload Manager under `/data/pldmgr/payloads` are listed automatically. Subdirectories are scanned too (`.elf`, `.bin` and `.self`), so Payload Manager's layout, one subfolder per payload, can be used directly without importing or copying files. Payloads are still identified by filename: within one folder a file in the root takes precedence over nested copies with the same filename, otherwise the first path in lexicographic order is used. If the same filename exists in both the Payloads directory and Payload Manager's folder, the newer file is shown. Renaming or deleting a shared payload changes the original file used by the other manager.
 
 Prospero intentionally keeps the primary action hierarchy simple:
 
@@ -239,19 +251,17 @@ Prospero intentionally keeps the primary action hierarchy simple:
 
 The **Payload Repositories** tab is a discovery and release-monitoring directory.
 
-It does **not** download or install payloads from the catalog.
+A release can be downloaded straight into the payload library from an entry. Nothing is installed or launched until you choose to.
 
 Prospero ships with a curated list of PS5 homebrew projects and groups them by developer.
 
 For supported GitHub/Gitea repositories, Prospero checks the upstream releases API and displays the newest non-draft, non-prerelease tag when available.
 
-Each entry provides an **Open** action that takes you directly to the project's real upstream repository.
+Each entry provides an **Open** action that takes you directly to the project's real upstream repository, and a **Download** action to pick a release.
 
 Users can also add custom repositories they want Prospero to keep watching. Custom entries participate in the same developer grouping and version-checking flow.
 
-> Payload Repositories is deliberately browse/open-only. Prospero does not mirror or rehost community payloads.
-
-The Payloads system may still use separate direct-URL functionality for an explicitly supplied payload asset URL; that is independent from the curated Payload Repositories catalog.
+> Prospero does not mirror or rehost community payloads: downloads come from the upstream project's own releases.
 
 Outbound repository requests use the project's PS5-native HTTP transport.
 
@@ -285,7 +295,10 @@ Features include:
 - Download a backup archive;
 - Restore an existing backup;
 - Inspect backup history;
+- Delete a save, with an optional backup first;
 - Optional automatic per-title backup watching.
+
+Backups can be written to one or more USB drives. Each drive gets its own copy under `<folder>/<title id>/<timestamp>.zip`, written to a temporary file on the drive, checked, and only then renamed into place, with the last 5 kept per title. A drive that is unplugged, full or read-only is reported and never replaced by internal storage; when no drive is chosen, backups stay in `/data/ProsperoMgr/save_backups`. Backups copy the original save files as they are, with no mounting or decryption, and a PS4 save always travels with its sealed key.
 
 Automatic backups use a settle-window approach so Prospero does not immediately capture save data while it may still be changing.
 
@@ -297,11 +310,7 @@ Restore operations are treated as destructive actions and should be used careful
 
 Prospero includes a complete dashboard-based Payload Autoloader for automatically launching your preferred payload sequence when Prospero starts.
 
-Open:
-
-```text
-Settings → Autoloader
-```
+Open **Autoloader** in the left menu.
 
 From the dashboard you can:
 
@@ -315,6 +324,8 @@ From the dashboard you can:
 - Control bundled-payload autostart behavior;
 - Monitor the current Autoloader status;
 - Run the complete sequence manually whenever needed.
+
+While the countdown runs (at least 5 seconds), pressing the PS button aborts the run. The page shows the run as a timeline with one step per payload.
 
 All Autoloader changes are saved automatically from the dashboard, so there is no separate Save button to manage.
 
@@ -338,7 +349,30 @@ The user can always bypass the automatic guard manually with:
 Run sequence now
 ```
 
-from Settings → Autoloader.
+from the Autoloader page.
+
+---
+
+## 🏠 Home Library
+
+Home lists what is installed on the console, read from the system's own database:
+
+- **Games** — with a platform filter (PS5/PS4), covers, version, size, and play time;
+- **Apps** — installed apps and homebrew, such as streaming apps, CheatRunner, and ShadowMount+.
+
+Games and apps start from their card. Web-based homebrew tiles open in the console's browser, and tiles that only the shell can open, such as Debug Settings, send a notification with an Open button.
+
+---
+
+## 🖼️ Media
+
+The Media tab lists the console's screenshots and clips.
+
+- Browse everything by day, or by game in the Albums tab;
+- Open a capture in the viewer, with previous/next;
+- Download one capture, several, or one ZIP of a selection;
+- Delete captures. This removes the capture from the console's gallery database (backed up first, last 5 copies kept in `/data/ProsperoMgr/media_db_backups`) and then its files;
+- Remove entries that the console still lists but whose image no longer exists.
 
 ---
 
@@ -399,6 +433,7 @@ Prospero Manager supports a fully localized interface in:
 - 🇮🇹 **Italian**
 - 🇯🇵 **Japanese**
 - 🇰🇷 **Korean**
+- 🇭🇺 **Hungarian**
 - 🇮🇷 **Persian**
 - 🇵🇱 **Polish**
 - 🇧🇷 **Brazilian Portuguese**
@@ -432,7 +467,9 @@ The interface also uses locale-aware:
 
 ## 🔄 Updating Prospero Manager
 
-When updating Prospero during the same console session, send the new:
+Prospero Manager checks GitHub releases and updates itself when the console is idle. Manage it in **Settings → About**. The downloaded ELF is kept in `/data/ProsperoMgr/update/`, and an older copy started later switches to it without internet.
+
+To update by hand during the same console session, send the new:
 
 ```text
 ProsperoMgr.elf
@@ -445,7 +482,7 @@ Prospero's same-boot Autoloader guard is designed so redeploying the manager doe
 If you intentionally want to replay the sequence afterward, use:
 
 ```text
-Settings → Autoloader → Run sequence now
+Autoloader → Run sequence now
 ```
 
 Persistent Prospero data lives under its `/data/ProsperoMgr/` storage area.
@@ -575,6 +612,7 @@ If you find it useful, consider supporting further development.
 - **[drakmor](https://github.com/drakmor)** — for [fan_target](https://github.com/drakmor/fan_target) and [ps5-hwinfo](https://github.com/drakmor/ps5-hwinfo), used as fan-control safety and hardware-telemetry references.
 - **[Libmicrohttpd](https://www.gnu.org/software/libmicrohttpd/)** — the HTTP server used by the backend.
 - **[Alexander Roshal / RARLab](https://www.rarlab.com/)** — for [UnRAR](https://www.rarlab.com/rar_add.htm), the library RAR extraction is built on. See `source/backend/third_party/unrar/license.txt` for its license terms.
+- **[Kazuhiko Arase](https://github.com/kazuhikoarase/qrcode-generator)** — for `qrcode-generator` (MIT), which draws the QR code on Home.
 - Everyone testing, reporting issues, sharing logs, and helping improve the project.
 
 ---

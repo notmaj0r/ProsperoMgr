@@ -24,6 +24,7 @@ std::mutex g_mu;
 std::deque<std::string> g_lines;
 std::time_t g_start = 0;
 std::string g_log_path;
+std::ofstream g_log_out; // Kept open, since reopening per line slowed bulk uploads.
 std::string g_instance_id;
 
 std::string Timestamp() {
@@ -51,9 +52,9 @@ void LogEvent(const std::string &line) {
     g_lines.push_back(formatted);
     if (g_lines.size() > kMaxLines) g_lines.pop_front();
 
-    if (!g_log_path.empty()) {
-        std::ofstream out(g_log_path, std::ios::app);
-        if (out) out << formatted << '\n';
+    if (g_log_out.is_open()) {
+        g_log_out << formatted << '\n';
+        g_log_out.flush();
     }
 
     KlogSend(line);
@@ -82,16 +83,18 @@ void ConfigurePersistentLog(const std::string &path) {
         std::filesystem::rename(path, previous, ec);
     }
 
-    std::ofstream out(path, std::ios::app);
-    if (!out) {
+    if (g_log_out.is_open()) g_log_out.close();
+    g_log_out.open(path, std::ios::app);
+    if (!g_log_out) {
         g_log_path.clear();
         return;
     }
-    out << "\n--- Prospero Manager session " << (g_instance_id.empty() ? "initializing" : g_instance_id)
-        << " pid=" << getpid() << " ---\n";
+    g_log_out << "\n--- Prospero Manager session " << (g_instance_id.empty() ? "initializing" : g_instance_id)
+              << " pid=" << getpid() << " ---\n";
     // Preserve events emitted before Config was available (privilege and
     // replacement diagnostics) in the durable log as well.
-    for (const auto &line : g_lines) out << line << '\n';
+    for (const auto &line : g_lines) g_log_out << line << '\n';
+    g_log_out.flush();
 }
 
 std::string PersistentLogPath() {

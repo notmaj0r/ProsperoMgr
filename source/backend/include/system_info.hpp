@@ -18,6 +18,8 @@ struct SystemInfo {
     std::string user_name;
     std::string user_id;
     std::vector<StorageVolume> storage;
+    uint64_t ram_total_bytes = 0; // 0 when the kernel doesn't report it
+    uint64_t ram_free_bytes = 0;
 };
 
 SystemInfo ReadSystemInfo();

@@ -18,7 +18,7 @@ export default function ImagePreview({ path, onClose }) {
   const filename = path.split('/').pop()
 
   return createPortal(
-    <div className={`pmgr-modal-overlay items-stretch p-0 sm:items-center sm:p-4 ${closing ? 'is-closing' : ''}`} onClick={close}>
+    <div className={`pmgr-modal-overlay !items-stretch !p-0 sm:!items-center sm:!p-4 ${closing ? 'is-closing' : ''}`} onClick={close}>
       <div
         ref={containerRef}
         role="dialog"

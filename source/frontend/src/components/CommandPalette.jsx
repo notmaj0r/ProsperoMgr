@@ -3,14 +3,17 @@ import { ICONS, NAV } from './NavRail.jsx'
 import { useDismiss } from '../lib/useDismiss.js'
 import { useDialogAccessibility } from '../lib/useDialogAccessibility.js'
 import { useI18n } from '../lib/i18n.jsx'
+import { isPS5 } from '../lib/effects.js'
 
 const DESCRIPTION_KEYS = {
   home: 'commandPalette.descHome',
   ftp: 'commandPalette.descFiles',
   payloads: 'commandPalette.descPayloads',
+  autoloader: 'settings.autoloaderDesc',
   repository: 'commandPalette.descRepository',
   pkg: 'commandPalette.descPkg',
   saves: 'commandPalette.descSaves',
+  media: 'commandPalette.descMedia',
   processes: 'commandPalette.descProcesses',
   avatar: 'commandPalette.descAvatar',
   settings: 'commandPalette.descSettings',
@@ -18,7 +21,6 @@ const DESCRIPTION_KEYS = {
 }
 
 const SETTINGS_COMMANDS = [
-  { id: 'settings-autoloader', target: 'settings', tab: 'autoloader', labelKey: 'settings.tabAutoloader', descKey: 'settings.autoloaderDesc' },
   { id: 'settings-appearance', target: 'settings', tab: 'appearance', labelKey: 'settings.tabAppearance', descKey: 'settings.appearanceDesc' },
   { id: 'settings-thermal', target: 'settings', tab: 'thermal', labelKey: 'settings.tabThermal', descKey: 'settings.thermalDesc' },
   { id: 'settings-experimental', target: 'settings', tab: 'experimental', labelKey: 'settings.tabExperimental', descKey: 'settings.experimentalDesc' },
@@ -74,11 +76,11 @@ export default function CommandPalette({ onClose, onNavigate }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'ArrowDown') {
+              if (e.key === 'ArrowDown' && !isPS5()) {
                 e.preventDefault()
                 setSelected((value) => Math.min(results.length - 1, value + 1))
               }
-              if (e.key === 'ArrowUp') {
+              if (e.key === 'ArrowUp' && !isPS5()) {
                 e.preventDefault()
                 setSelected((value) => Math.max(0, value - 1))
               }

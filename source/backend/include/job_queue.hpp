@@ -1,6 +1,6 @@
 #pragma once
 // A tiny persistent worker pool for one-shot background jobs (payload downloads,
-// catalog checks) with an explicit stack size, unlike the per-job threads this replaced.
+// catalog checks) with an explicit stack size.
 
 #include <functional>
 

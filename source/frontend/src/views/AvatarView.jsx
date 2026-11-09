@@ -247,7 +247,7 @@ export default function AvatarView() {
             <div className="text-sm text-text-dim">{who.error}</div>
           )
         ) : (
-          <div className="text-sm text-text-dim">{t('common.loading')}</div>
+          <div className="pmgr-skeleton h-4 w-40 rounded" />
         )}
         <p className="mt-3 text-xs text-text-dim">{t('profile.idCap')}</p>
       </Panel>

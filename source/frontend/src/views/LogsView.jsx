@@ -10,6 +10,8 @@ import { api } from '../lib/api.js'
 import { copyText } from '../lib/clipboard.js'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useI18n } from '../lib/i18n.jsx'
+import { POLL_SCALE } from '../lib/usePolling.js'
+import { SkeletonRows } from '../components/Skeleton.jsx'
 
 function logTone(line) {
   if (/failed|error|unreachable/i.test(line)) return 'text-err'
@@ -37,19 +39,22 @@ export default function LogsView({ onNavigate }) {
 
   useEffect(() => {
     let cancelled = false
+    // Keeps the old array when nothing new arrived, so a quiet log does not redraw every line.
+    const sameLines = (a, b) => a && a.length === b.length && a[a.length - 1] === b[b.length - 1]
     const poll = () => {
-      api.logs.list().then((r) => !cancelled && setLogs(r.lines)).catch(() => {})
+      if (document.visibilityState === 'hidden') return
+      api.logs.list().then((r) => !cancelled && setLogs((prev) => (sameLines(prev, r.lines) ? prev : r.lines))).catch(() => {})
       api.klogs
         .list()
         .then((r) => {
           if (cancelled) return
-          setKlogs(r.lines)
+          setKlogs((prev) => (sameLines(prev, r.lines) ? prev : r.lines))
           setKlogConnected(r.connected)
         })
         .catch(() => {})
     }
     poll()
-    const id = setInterval(poll, 3000)
+    const id = setInterval(poll, 3000 * POLL_SCALE)
     return () => {
       cancelled = true
       clearInterval(id)
@@ -71,6 +76,12 @@ export default function LogsView({ onNavigate }) {
   useEffect(() => {
     if (autoScroll && consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight
   }, [visible.length, autoScroll])
+
+  // Scrolling up stops following; reaching the bottom again resumes it.
+  const onConsoleScroll = () => {
+    const el = consoleRef.current
+    if (el) setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 24)
+  }
 
   const copyLogs = () => {
     const text = visible.map((l) => l.line).join('\n')
@@ -128,9 +139,9 @@ export default function LogsView({ onNavigate }) {
         </div>
       )}
 
-      <div ref={consoleRef} className="pmgr-log-console" style={{ maxHeight: '60vh' }} dir="ltr">
+      <div ref={consoleRef} onScroll={onConsoleScroll} className="pmgr-log-console" style={{ maxHeight: '60vh' }} dir="ltr">
         {loading ? (
-          <div className="grid h-24 place-items-center text-sm text-text-dim">{t('common.loading')}</div>
+          <SkeletonRows count={4} />
         ) : visible.length === 0 ? (
           <EmptyState size="sm" icon={<LogsIcon size={22} />} title={t('logs.emptyTitle')} />
         ) : (
@@ -148,7 +159,8 @@ export default function LogsView({ onNavigate }) {
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-panel-border pt-3">
         <Button tone="neutral" size="sm" icon={<ClipboardIcon size={13} />} onClick={copyLogs}>{t('logs.copy')}</Button>
         <Button tone="neutral" size="sm" onClick={exportLogs}>{t('logs.export')}</Button>
-        <Button tone="danger" size="sm" className="ml-auto" onClick={() => setClearOpen(true)}>{t('logs.clear')}</Button>
+        <span className="pmgr-num ml-auto mr-2 text-xs text-text-dim">{t('logs.lines')}: {visible.length}</span>
+        <Button tone="danger" size="sm" onClick={() => setClearOpen(true)}>{t('logs.clear')}</Button>
       </div>
 
       {clearOpen && (

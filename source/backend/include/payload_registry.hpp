@@ -33,7 +33,7 @@ struct PayloadInfo {
     uint64_t launch_count = 0;
     int64_t last_launched_unix = 0;
     std::string installed_version;
-    std::string source; // "repository" | "uploaded" | "usb", empty if unrecorded
+    std::string source; // "repository" | "uploaded" | "usb" | "payloadManager", empty if unrecorded
     std::string source_url; // catalog repo URL this came from, empty if unknown/not from the catalog
 };
 

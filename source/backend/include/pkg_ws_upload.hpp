@@ -10,4 +10,7 @@ namespace prospero {
 // hands itself straight to StartPkgInstallJobFromLiveSession from inside this listener.
 void StartPkgWsUpload(const Config &cfg);
 
+// Total microseconds the upload thread has spent waiting for the browser to send.
+uint64_t PkgWsRecvWaitMicros();
+
 } // namespace prospero

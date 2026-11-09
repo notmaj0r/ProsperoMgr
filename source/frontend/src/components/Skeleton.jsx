@@ -1,8 +1,8 @@
 // Shimmering placeholder grid, swapped in for tile grids' initial load instead of a bare
 // "Loading…" line. Pass the same grid-cols classes the real grid uses so it lines up.
-export default function SkeletonGrid({ count = 6, gridClassName = 'grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6' }) {
+export default function SkeletonGrid({ count = 6, gridClassName = 'grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6', gridStyle }) {
   return (
-    <div className={`grid ${gridClassName}`}>
+    <div className={`grid ${gridClassName}`} style={gridStyle}>
       {Array.from({ length: count }, (_, i) => (
         <div key={i} className="overflow-hidden rounded-lg border border-panel-border">
           <div className="pmgr-skeleton aspect-square w-full" />

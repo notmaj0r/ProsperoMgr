@@ -9,7 +9,7 @@ export default function SegmentedControl({ options, value, onChange, className =
           type="button"
           aria-pressed={value === opt.id}
           onClick={() => onChange(opt.id)}
-          className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+          className={`pmgr-seg grow rounded-lg px-3 py-1.5 text-xs font-semibold ${
             value === opt.id ? 'bg-accent text-white' : 'text-text-dim hover:bg-panel-border hover:text-text'
           }`}
         >

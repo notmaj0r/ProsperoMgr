@@ -43,8 +43,8 @@ struct prosperomgr_http_result {
     long long write_ms; // time spent inside write()
 };
 
-// Buffers the whole response body in memory (up to max_body_bytes) — only for small metadata
-// responses. *out_body is malloc'd, caller frees it. header_name/value add one extra header, or NULL for none.
+// Buffers the whole body in memory (up to max_body_bytes), so only use it for small responses.
+// *out_body is malloc'd and the caller frees it; header_name/value add one extra header, or NULL.
 int prosperomgr_ps5_http_get(const char *url, char **out_body, size_t *out_len, size_t max_body_bytes,
                              const char *header_name, const char *header_value,
                              struct prosperomgr_http_result *result);

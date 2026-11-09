@@ -34,3 +34,10 @@ export function volumeLabel(volume, t) {
   const translated = t(key, { index: volume.index })
   return translated === key ? volume.label : translated
 }
+
+// Storage bar colour: calm until the disk is nearly full.
+export function volumeBarClass(pct) {
+  if (pct >= 93) return 'bg-err'
+  if (pct >= 80) return 'bg-warn'
+  return 'bg-accent'
+}

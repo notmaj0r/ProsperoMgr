@@ -110,6 +110,13 @@ export const PowerIcon = (p) => (
   </IconBase>
 )
 
+export const EjectIcon = (p) => (
+  <IconBase {...p}>
+    <path d="M12 5 5 14h14Z" />
+    <path d="M5 18.5h14" />
+  </IconBase>
+)
+
 export const DeleteIcon = (p) => (
   <IconBase {...p}>
     <path d="M4 7h16" />
@@ -152,6 +159,12 @@ export const SaveIcon = (p) => (
   </IconBase>
 )
 
+export const CheckIcon = (p) => (
+  <IconBase {...p}>
+    <path d="M5 12.5l4.5 4.5L19 7" />
+  </IconBase>
+)
+
 export const CloseIcon = (p) => (
   <IconBase {...p}>
     <path d="M6 6l12 12M18 6 6 18" />
@@ -176,6 +189,12 @@ export const ExternalIcon = (p) => (
     <path d="M14 4h6v6" />
     <path d="M20 4 10 14" />
     <path d="M8 6H5a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3" />
+  </IconBase>
+)
+
+export const RowsIcon = (p) => (
+  <IconBase {...p}>
+    <path d="M4 6h16M4 10.5h16M4 15h16M4 19.5h16" />
   </IconBase>
 )
 
@@ -393,4 +412,27 @@ export const StarFilledIcon = ({ size = 16, className = '' }) => (
   <svg className={`pmgr-action-icon ${className}`} aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
     <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2Z" />
   </svg>
+)
+
+export const QrIcon = (p) => (
+  <IconBase {...p}>
+    <rect x="4" y="4" width="6" height="6" rx="1" />
+    <rect x="14" y="4" width="6" height="6" rx="1" />
+    <rect x="4" y="14" width="6" height="6" rx="1" />
+    <path d="M14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z" />
+  </IconBase>
+)
+
+export const PauseIcon = (p) => (
+  <IconBase {...p}>
+    <path d="M9 5v14M15 5v14" />
+  </IconBase>
+)
+
+export const CpuIcon = (p) => (
+  <IconBase {...p}>
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+    <rect x="9.5" y="9.5" width="5" height="5" />
+    <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" />
+  </IconBase>
 )

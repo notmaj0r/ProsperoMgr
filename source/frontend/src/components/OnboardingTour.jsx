@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ICONS } from './NavRail.jsx'
+import { CheckIcon, CloseIcon } from './icons.jsx'
 import { useDismiss } from '../lib/useDismiss.js'
 import { useI18n } from '../lib/i18n.jsx'
 import { useDialogAccessibility } from '../lib/useDialogAccessibility.js'
@@ -53,7 +54,7 @@ export default function OnboardingTour({ onClose, onNavigate }) {
                       : 'bg-panel-border text-text-dim'
                 }`}
               >
-                {i < step ? '✓' : i + 1}
+                {i < step ? <CheckIcon size={14} /> : i + 1}
               </button>
               {i < STEPS.length - 1 && <span className={`h-6 w-px ${i < step ? 'bg-accent/50' : 'bg-panel-border'}`} />}
             </div>
@@ -66,7 +67,7 @@ export default function OnboardingTour({ onClose, onNavigate }) {
             aria-label={t('common.close')}
             className="ml-auto mb-2 grid h-7 w-7 place-items-center rounded-full bg-panel-border text-xs text-text-dim hover:text-text"
           >
-            ✕
+            <CloseIcon size={12} />
           </button>
 
           <div className="mb-4 flex items-center gap-3">

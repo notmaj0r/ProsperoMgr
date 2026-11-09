@@ -48,13 +48,16 @@ constexpr auto kProgressThrottle = std::chrono::milliseconds(100);
 // Backstop for a "Download as ZIP" temp file that never got downloaded —
 // the normal path unlinks it the instant the download route opens it.
 constexpr auto kEphemeralArchiveTtl = std::chrono::minutes(30);
-constexpr auto kUploadReservationTtl = std::chrono::minutes(30);
+// An upload that stops sending for this long no longer blocks deleting or moving its folder.
+constexpr auto kUploadReservationTtl = std::chrono::seconds(15);
+constexpr auto kCancelledUploadTtl = std::chrono::minutes(1);
 
 Config g_cfg;
 std::mutex g_mu;
 std::mutex g_mutation_mu;
 std::deque<FileJobInfo> g_jobs;
 std::atomic<bool> g_cancel{false};
+std::atomic<bool> g_paused{false};
 std::atomic<bool> g_started{false};
 bool g_immediate_mutation = false;
 size_t g_external_readers = 0;
@@ -68,6 +71,7 @@ struct UploadReservation {
 };
 
 std::unordered_map<std::string, UploadReservation> g_uploads;
+std::unordered_map<std::string, std::chrono::steady_clock::time_point> g_cancelled_uploads; // path + '\n' + token
 
 bool SyncFile(int fd);
 
@@ -1062,8 +1066,22 @@ int UnrarWriteCallback(UINT msg, LPARAM UserData, LPARAM P1, LPARAM P2) {
     return 0;
 }
 
-// Same staged-extraction shape as RunUnzip, via UnRAR's DLL API (vendored under
-// third_party/unrar/) instead of miniz — see that license for terms.
+// Under the "cancel" policy a clash is fatal, so check before extracting gigabytes just to discard them.
+bool FailOnExtractConflict(const FileJobInfo &job, const std::vector<fs::path> &relatives, std::string *err) {
+    if (job.conflict_policy != "cancel") return false;
+    std::error_code ec;
+    fs::path destination(job.destination);
+    if (!PathEntryExists(destination, &ec)) return false;
+    for (const auto &relative : relatives) {
+        if (!PathEntryExists(destination / relative, &ec)) continue;
+        if (err) *err = "destination already has conflicting files: " + relative.string();
+        SetErrorCode(job.id, "destination_exists");
+        return true;
+    }
+    return false;
+}
+
+// Same staged extraction as RunUnzip, through UnRAR's DLL API (vendored in third_party/unrar/).
 bool RunUnrarExtraction(FileJobInfo job, std::string *err) {
     fs::path source(job.source), destination(job.destination);
 
@@ -1124,6 +1142,9 @@ bool RunUnrarExtraction(FileJobInfo job, std::string *err) {
         SetErrorCode(job.id, "no_space");
         return false;
     }
+    std::vector<fs::path> rar_files;
+    for (const auto &entry : entries) if (!entry.is_dir) rar_files.push_back(entry.relative);
+    if (FailOnExtractConflict(job, rar_files, err)) return false;
 
     fs::path staged = destination.string() + ".pmgr-job-" + std::to_string(job.id);
     std::error_code ec;
@@ -1273,6 +1294,7 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
     mz_uint count = mz_zip_reader_get_num_files(&zip);
     uint64_t total = 0, item_count = 0;
     std::vector<mz_uint> file_indices;
+    std::vector<fs::path> file_relatives;
     std::vector<fs::path> directory_entries;
     for (mz_uint i = 0; i < count; i++) {
         mz_zip_archive_file_stat stat {};
@@ -1299,6 +1321,7 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
         total += stat.m_uncomp_size;
         item_count++;
         file_indices.push_back(i);
+        file_relatives.push_back(relative);
     }
     UpdateJob(job.id, [&](FileJobInfo &j) { j.total_bytes = total; j.total_items = item_count; j.state = "running"; });
 
@@ -1310,6 +1333,10 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
         mz_zip_reader_end(&zip);
         if (err) *err = "not enough free space to extract this archive";
         SetErrorCode(job.id, "no_space");
+        return false;
+    }
+    if (FailOnExtractConflict(job, file_relatives, err)) {
+        mz_zip_reader_end(&zip);
         return false;
     }
 
@@ -1518,6 +1545,8 @@ bool CollectDeleteEntries(const std::string &path, dev_t root_device, std::vecto
     return ok;
 }
 
+constexpr size_t kDeleteThreads = 6;
+
 bool RunDelete(FileJobInfo job, std::string *err) {
     struct stat root {};
     if (lstat(job.source.c_str(), &root) != 0) {
@@ -1525,31 +1554,79 @@ bool RunDelete(FileJobInfo job, std::string *err) {
         return false;
     }
     UpdateJob(job.id, [](FileJobInfo &current) { current.state = "scanning"; });
+    auto scan_start = std::chrono::steady_clock::now();
     std::vector<DeleteEntry> entries;
     uint64_t total = 0;
     if (!CollectDeleteEntries(job.source, root.st_dev, &entries, &total, err)) return false;
+    auto delete_start = std::chrono::steady_clock::now();
     UpdateJob(job.id, [&](FileJobInfo &current) {
         current.state = "running";
         current.total_bytes = total;
         current.total_items = entries.size();
     });
 
-    uint64_t completed = 0;
-    for (size_t i = 0; i < entries.size(); i++) {
-        if (IsCanceled()) return false;
-        const DeleteEntry &entry = entries[i];
-        int rc = entry.is_dir ? rmdir(entry.path.c_str()) : unlink(entry.path.c_str());
-        if (rc != 0) {
-            if (err) *err = std::string("could not delete ") + entry.path + ": " + std::strerror(errno);
-            return false;
+    // Each unlink costs a few milliseconds of filesystem latency, so files are removed by a few
+    // threads at once. Directories go afterwards, in the scan order (children before parents).
+    std::vector<const DeleteEntry *> files, dirs;
+    for (const DeleteEntry &entry : entries) (entry.is_dir ? dirs : files).push_back(&entry);
+
+    std::atomic<size_t> next_file{0}, removed{0}, active{0};
+    std::atomic<uint64_t> removed_bytes{0};
+    std::atomic<bool> stop{false};
+    std::mutex failure_mu;
+    std::string failure;
+    auto remove_files = [&]() {
+        for (;;) {
+            if (stop.load() || IsCanceled()) break;
+            size_t i = next_file.fetch_add(1);
+            if (i >= files.size()) break;
+            const DeleteEntry &entry = *files[i];
+            if (unlink(entry.path.c_str()) != 0) {
+                std::lock_guard<std::mutex> lock(failure_mu);
+                if (failure.empty()) failure = std::string("could not delete ") + entry.path + ": " + std::strerror(errno);
+                stop = true;
+                break;
+            }
+            removed_bytes += entry.size;
+            removed++;
         }
-        completed += entry.size;
+        active--;
+    };
+    size_t thread_count = std::min(kDeleteThreads, files.size());
+    std::vector<std::thread> pool;
+    active = thread_count;
+    for (size_t t = 0; t < thread_count; t++) pool.emplace_back(remove_files);
+    // Progress is for the page, which polls once a second, so it is refreshed a few times a second at most.
+    while (active.load() > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         UpdateJob(job.id, [&](FileJobInfo &current) {
-            current.completed_bytes = completed;
-            current.current = entry.path;
-            current.current_index = i + 1;
+            current.completed_bytes = removed_bytes.load();
+            current.current_index = removed.load();
         });
     }
+    for (std::thread &worker : pool) worker.join();
+    if (!failure.empty()) {
+        if (err) *err = failure;
+        return false;
+    }
+    if (IsCanceled()) return false;
+
+    uint64_t completed = removed_bytes.load();
+    for (size_t i = 0; i < dirs.size(); i++) {
+        if (IsCanceled()) return false;
+        if (rmdir(dirs[i]->path.c_str()) != 0) {
+            if (err) *err = std::string("could not delete ") + dirs[i]->path + ": " + std::strerror(errno);
+            return false;
+        }
+    }
+    UpdateJob(job.id, [&](FileJobInfo &current) {
+        current.completed_bytes = completed;
+        current.current_index = entries.size();
+    });
+    auto done = std::chrono::steady_clock::now();
+    auto ms = [](auto from, auto to) { return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count()); };
+    LogEvent("Delete #" + std::to_string(job.id) + ": " + std::to_string(entries.size()) + " entries, " + std::to_string(total) +
+             " bytes, " + std::to_string(thread_count) + " threads, scan " + ms(scan_start, delete_start) + " ms, remove " + ms(delete_start, done) + " ms");
     return true;
 }
 
@@ -1574,7 +1651,7 @@ void Worker() {
         {
             std::lock_guard<std::mutex> lock(g_mu);
             for (auto &candidate : g_jobs) {
-                if (candidate.state == "queued") {
+                if (candidate.state == "queued" && !g_paused) {
                     candidate.state = "running";
                     job = candidate;
                     g_cancel = false;
@@ -1856,6 +1933,10 @@ bool ReserveFileUpload(const std::string &path, const std::string &token, bool e
     std::string normalized = fs::path(path).lexically_normal().string();
     std::lock_guard<std::mutex> lock(g_mu);
     PruneUploadReservationsLocked();
+    if (g_cancelled_uploads.count(normalized + '\n' + token)) {
+        if (err) *err = "upload canceled";
+        return false;
+    }
     if (g_immediate_mutation || (IsExternalStoragePath(normalized) && g_external_readers != 0) ||
         std::any_of(g_jobs.begin(), g_jobs.end(), ActiveState)) {
         if (err) *err = "another file operation is in progress";
@@ -1863,10 +1944,6 @@ bool ReserveFileUpload(const std::string &path, const std::string &token, bool e
     }
     auto existing = g_uploads.find(normalized);
     if (existing != g_uploads.end() && existing->second.token == token) {
-        if (existing->second.in_use) {
-            if (err) *err = "this upload checkpoint is already in use";
-            return false;
-        }
         existing->second.last_seen = std::chrono::steady_clock::now();
         existing->second.expires_when_idle = expires_when_idle;
         existing->second.in_use = true;
@@ -1889,6 +1966,19 @@ void IdleFileUpload(const std::string &path, const std::string &token) {
     if (found == g_uploads.end() || found->second.token != token) return;
     found->second.in_use = false;
     found->second.last_seen = std::chrono::steady_clock::now();
+}
+
+void CancelFileUpload(const std::string &path, const std::string &token) {
+    std::string normalized = fs::path(path).lexically_normal().string();
+    std::lock_guard<std::mutex> lock(g_mu);
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = g_cancelled_uploads.begin(); it != g_cancelled_uploads.end();) {
+        if (now - it->second > kCancelledUploadTtl) it = g_cancelled_uploads.erase(it);
+        else ++it;
+    }
+    g_cancelled_uploads[normalized + '\n' + token] = now;
+    auto found = g_uploads.find(normalized);
+    if (found != g_uploads.end() && found->second.token == token) g_uploads.erase(found);
 }
 
 void ReleaseFileUpload(const std::string &path, const std::string &token) {
@@ -2096,7 +2186,10 @@ bool QueueUnzipJob(const std::string &source, const std::string &destination, co
     for (const auto &job : g_jobs) {
         if (ActiveState(job)) {
             active++;
-            if (JobOverlaps(job, {source}, destination)) {
+            // Archives that sit together can share a destination: jobs run one at a time, so
+            // only the same archive twice is a clash.
+            bool sibling_unzip = job.type == "unzip" && job.source != source;
+            if (!sibling_unzip && JobOverlaps(job, {source}, destination)) {
                 if (err) *err = "that path overlaps a queued file operation";
                 return false;
             }
@@ -2150,10 +2243,45 @@ bool CancelFileJob(uint64_t id, std::string *err) {
     return false;
 }
 
-void ClearFinishedFileJobs() {
+void SetFileJobsPaused(bool paused) { g_paused = paused; }
+
+bool FileJobsPaused() { return g_paused; }
+
+bool FileJobsActive() {
     std::lock_guard<std::mutex> lock(g_mu);
-    g_jobs.erase(std::remove_if(g_jobs.begin(), g_jobs.end(), [](const FileJobInfo &job) {
-        return job.state == "done" || job.state == "attention" || job.state == "canceled" || job.state == "error";
+    return std::any_of(g_jobs.begin(), g_jobs.end(), ActiveState);
+}
+
+bool MoveFileJob(uint64_t id, bool up, std::string *err) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    auto it = std::find_if(g_jobs.begin(), g_jobs.end(), [&](const FileJobInfo &job) { return job.id == id; });
+    if (it == g_jobs.end() || it->state != "queued") {
+        if (err) *err = "only a queued job can be moved";
+        return false;
+    }
+    auto isQueued = [](const FileJobInfo &job) { return job.state == "queued"; };
+    auto other = it;
+    if (up) {
+        do {
+            if (other == g_jobs.begin()) return true;
+            --other;
+        } while (!isQueued(*other));
+    } else {
+        do {
+            ++other;
+            if (other == g_jobs.end()) return true;
+        } while (!isQueued(*other));
+    }
+    std::iter_swap(it, other);
+    PersistLocked();
+    return true;
+}
+
+void ClearFinishedFileJobs(bool only_done) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_jobs.erase(std::remove_if(g_jobs.begin(), g_jobs.end(), [only_done](const FileJobInfo &job) {
+        if (job.state == "done") return true;
+        return !only_done && (job.state == "attention" || job.state == "canceled" || job.state == "error");
     }), g_jobs.end());
     PersistLocked();
 }

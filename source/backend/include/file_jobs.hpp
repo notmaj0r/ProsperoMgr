@@ -42,6 +42,8 @@ bool ReserveFileUpload(const std::string &path, const std::string &token, bool e
                        std::string *err);
 void IdleFileUpload(const std::string &path, const std::string &token);
 void ReleaseFileUpload(const std::string &path, const std::string &token);
+// Same as Release, but a late request for this upload is refused.
+void CancelFileUpload(const std::string &path, const std::string &token);
 bool QueueFileJob(const std::string &type, const std::string &source, const std::string &destination,
                   const std::string &conflict_policy, uint64_t *job_id, std::string *err);
 bool QueueDeleteJob(const std::string &path, uint64_t *job_id, std::string *err);
@@ -59,7 +61,15 @@ bool QueueUnzipJob(const std::string &source, const std::string &destination, co
                    bool delete_source_on_success, const std::string &password, uint64_t *job_id, std::string *err);
 std::vector<FileJobInfo> GetFileJobs();
 bool CancelFileJob(uint64_t id, std::string *err);
-void ClearFinishedFileJobs();
+// With only_done, jobs that failed or need attention stay in the list.
+void ClearFinishedFileJobs(bool only_done = false);
+// A paused queue lets the running job finish but starts nothing new.
+void SetFileJobsPaused(bool paused);
+bool FileJobsPaused();
+// Moves a queued job one slot up or down among the queued ones.
+bool MoveFileJob(uint64_t id, bool up, std::string *err);
+// True while a job is queued, scanning or running.
+bool FileJobsActive();
 
 // Case-insensitive ".zip" check, so archive.ZIP matches too.
 bool IsZipFilename(const std::string &name);

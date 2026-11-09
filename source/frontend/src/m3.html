@@ -1,0 +1,16 @@
+<!doctype html><body style="margin:0"><div id=o style="color:#0f0;background:#000;font:13px monospace;white-space:pre-wrap"></div>
+<img src="/slow.png" width=1 height=1><iframe id=f style="width:900px;height:500px;border:0" src="/#/ftp"></iframe>
+<script>
+localStorage.setItem('pmgr_tour_seen','1');
+const f=document.getElementById('f');const log=[];const L=s=>{log.push(s);document.getElementById('o').textContent=log.join('\n')};
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+const tray=()=>{const d=f.contentDocument;return [...d.querySelectorAll('div')].some(e=>/space-y-1\.5/.test(e.className)&&/files|MB|KB|B\/s|%/.test(e.textContent)&&e.textContent.length<300)};
+(async()=>{await wait(2500);const d=f.contentDocument;
+const input=[...d.querySelectorAll('input[type=file]')].find(i=>i.multiple&&!i.webkitdirectory);
+const dt=new f.contentWindow.DataTransfer();dt.items.add(new f.contentWindow.File([new Uint8Array(2000000)],'big.bin'));input.files=dt.files;input.dispatchEvent(new f.contentWindow.Event('change',{bubbles:true}));
+await wait(1500);L('uploading, tray visible: '+tray());
+f.contentWindow.location.hash='#/home';await wait(1500);L('on home, hash='+f.contentWindow.location.hash);
+f.contentWindow.location.hash='#/ftp';await wait(1500);L('back on files, tray visible: '+tray());
+await wait(9000);L('after upload ends, tray visible: '+tray());
+})()
+</script>

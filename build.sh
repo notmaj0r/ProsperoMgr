@@ -173,6 +173,8 @@ fi
 rm -f "$ELF"
 
 # How many files this invocation will actually compile — a dry run, so an
+# main.cpp carries the build time shown in the startup log, so it is rebuilt every run.
+touch "$ROOT/source/backend/src/main.cpp"
 # incremental build shows its real (smaller) total instead of every source file.
 TOTAL_UNITS=$(PS5_PAYLOAD_SDK="$SDK_ROOT" DEBUG_NET="$OPT_DEBUG_NET" \
               make -n --no-print-directory -C "$ROOT" 2>/dev/null | grep -c -- '-c -o build/obj-ps5/' || true)

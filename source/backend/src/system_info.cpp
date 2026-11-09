@@ -71,6 +71,22 @@ SystemInfo ReadSystemInfo() {
         if (!user.user_name.empty() && user.user_name != "?") info.user_name = user.user_name;
     }
     info.storage = ListStorageVolumes();
+
+    // Values stay 0 if the kernel hides these counters.
+    // Read once: the kernel logs an error on every hw.physmem read.
+    static const uint64_t physmem = []() {
+        uint64_t value = 0;
+        size_t len = sizeof(value);
+        return sysctlbyname("hw.physmem", &value, &len, nullptr, 0) == 0 ? value : 0;
+    }();
+    uint32_t free_pages = 0, page_size = 0;
+    size_t free_size = sizeof(free_pages), page_size_len = sizeof(page_size);
+    if (physmem &&
+        sysctlbyname("vm.stats.vm.v_free_count", &free_pages, &free_size, nullptr, 0) == 0 &&
+        sysctlbyname("hw.pagesize", &page_size, &page_size_len, nullptr, 0) == 0) {
+        info.ram_total_bytes = physmem;
+        info.ram_free_bytes = static_cast<uint64_t>(free_pages) * page_size;
+    }
     return info;
 }
 

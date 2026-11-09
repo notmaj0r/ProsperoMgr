@@ -2,6 +2,7 @@
 // Serves one staged .pkg to the PS5 installer over HTTP byte ranges, so a package
 // can be installed where it already sits instead of being copied first.
 
+#include <cstdint>
 #include <string>
 
 namespace prospero {
@@ -20,5 +21,12 @@ bool StartLivePkgStream(const std::string &session_id, std::string *uri, std::st
 // Drops the session behind `uri`; later requests get 404. Takes the uri, not the
 // newest session, which may belong to another install still streaming.
 void StopPkgStream(const std::string &uri);
+
+// Keeps one PNG for the console's install card and returns the URL it is fetched from.
+// An empty or non-PNG image clears it and returns an empty string.
+std::string SetPkgCover(const std::string &png);
+
+// Total bytes the stream server has sent to the installer since startup, for rate logging.
+uint64_t PkgStreamBytesServed();
 
 } // namespace prospero

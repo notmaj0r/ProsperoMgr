@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import EmojiText from './EmojiText.jsx'
 import { ChevronRightIcon } from './icons.jsx'
 import { useDismiss } from '../lib/useDismiss.js'
 import { useI18n } from '../lib/i18n.jsx'
@@ -20,6 +21,12 @@ export const ICONS = {
   payloads: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" strokeLinejoin="round" />
+    </svg>
+  ),
+  autoloader: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M12 3v8" strokeLinecap="round" />
+      <path d="M7.5 6.5a7 7 0 1 0 9 0" strokeLinecap="round" />
     </svg>
   ),
   repository: (
@@ -56,6 +63,13 @@ export const ICONS = {
       <path d="M8 4v5h7V4M8 14h8v6H8v-6Z" strokeLinejoin="round" />
     </svg>
   ),
+  media: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="9" cy="10" r="1.6" />
+      <path d="m4 17 5-4.5 3.5 3 3-2.5L20 17" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
   pkg: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <path d="M12 3v11" strokeLinecap="round" />
@@ -66,13 +80,15 @@ export const ICONS = {
 }
 
 // Grouped by how often you'd reach for it, not alphabetically — everyday tasks first, console
-// internals last. `id` (routing/API) stays stable even when the label changes, e.g. "Processes" -> "Running Processes".
+// internals last. `id` is used for routing and stays stable when a label changes.
 export const NAV = [
   { id: 'home', labelKey: 'nav.home', group: 'Main' },
   { id: 'ftp', labelKey: 'nav.files', group: 'Main' },
   { id: 'payloads', labelKey: 'nav.payloads', group: 'Main' },
+  { id: 'autoloader', labelKey: 'nav.autoloader', group: 'Main' },
   { id: 'pkg', labelKey: 'nav.installPkg', group: 'Main' },
   { id: 'saves', labelKey: 'nav.saveBackups', group: 'Main' },
+  { id: 'media', labelKey: 'nav.media', group: 'Tools' },
   { id: 'repository', labelKey: 'nav.payloadRepositories', mobileLabelKey: 'nav.repositoriesShort', group: 'Tools' },
   { id: 'avatar', labelKey: 'nav.profile', group: 'Tools' },
   { id: 'processes', labelKey: 'nav.runningProcesses', group: 'Advanced' },
@@ -90,7 +106,9 @@ const GROUP_LABEL_KEYS = {
 const MOBILE_PRIMARY = new Set(['home', 'ftp', 'payloads', 'pkg'])
 const COLLAPSE_KEY = 'pmgr_nav_collapsed'
 
-function MobileMoreSheet({ active, closing, onClose, onOpen, t }) {
+function MobileMoreSheet({ active, onClosed, onOpen, t }) {
+  // The sheet owns its closing state, so it starts fresh every time it opens.
+  const { closing, close: onClose } = useDismiss(onClosed)
   const dialogRef = useDialogAccessibility(onClose)
 
   return (
@@ -129,8 +147,13 @@ function MobileMoreSheet({ active, closing, onClose, onOpen, t }) {
 export default function NavRail({ active, onChange }) {
   const { t } = useI18n()
   const [moreOpen, setMoreOpen] = useState(false)
+  const navListRef = useRef(null)
   const [collapsed, setCollapsed] = useState(() => window.localStorage.getItem(COLLAPSE_KEY) === '1')
-  const { closing: moreClosing, close: closeMore } = useDismiss(() => setMoreOpen(false))
+
+  // On a short screen the current page can sit below the fold of the list.
+  useEffect(() => {
+    navListRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest' })
+  }, [active])
 
   useEffect(() => {
     window.localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0')
@@ -144,10 +167,7 @@ export default function NavRail({ active, onChange }) {
 
   return (
     <>
-      {/* Icon column stays at a fixed position the whole time — only the
-          label strip next to it grows/shrinks. Animating justify-content
-          instead (icon jumping from centered to left-aligned) is what made
-          the old version feel like it snapped instead of sliding. */}
+      {/* The icon column stays put; only the label strip grows and shrinks. */}
       <aside
         className={`pmgr-nav-shell hidden h-full shrink-0 flex-col border-r border-panel-border transition-[width] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] md:flex ${
           collapsed ? 'w-[72px]' : 'w-64'
@@ -157,7 +177,7 @@ export default function NavRail({ active, onChange }) {
           <img
             src="/icon-64.png"
             alt="Prospero Manager"
-            className="h-12 w-12 shrink-0 rounded-xl border border-accent/40 shadow-[0_0_28px_-4px_var(--color-accent)]"
+            className="h-12 w-12 max-w-none shrink-0 rounded-xl border border-accent/40 shadow-[0_0_28px_-4px_var(--color-accent)]"
           />
           <div
             className="min-w-0 flex-1 overflow-hidden whitespace-nowrap transition-[opacity] duration-200"
@@ -167,7 +187,7 @@ export default function NavRail({ active, onChange }) {
           </div>
         </div>
 
-        <nav className="pmgr-nav-list flex flex-1 flex-col gap-1 overflow-y-auto overflow-x-hidden px-2 py-4">
+        <nav ref={navListRef} className="pmgr-nav-list flex flex-1 flex-col gap-1 overflow-y-auto overflow-x-hidden px-2 py-4">
           {NAV.map((n, i) => (
             <div key={n.id}>
               {n.group !== NAV[i - 1]?.group && (
@@ -225,7 +245,7 @@ export default function NavRail({ active, onChange }) {
           style={{ opacity: collapsed ? 0 : 1, transitionDelay: collapsed ? '0ms' : '120ms' }}
         >
           <div className="text-xs leading-relaxed text-text-dim">
-            {t('nav.madeWith')}
+            <EmojiText text={t('nav.madeWith')} />
           </div>
         </div>
       </aside>
@@ -261,7 +281,7 @@ export default function NavRail({ active, onChange }) {
       </nav>
 
       {moreOpen && (
-        <MobileMoreSheet active={active} closing={moreClosing} onClose={closeMore} onOpen={open} t={t} />
+        <MobileMoreSheet active={active} onClosed={() => setMoreOpen(false)} onOpen={open} t={t} />
       )}
     </>
   )

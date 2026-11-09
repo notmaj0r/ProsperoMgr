@@ -1,9 +1,11 @@
 #include "job_queue.hpp"
 #include "pkg_installer.hpp"
 
+#include <strings.h>
 #include <sys/stat.h>
 
 #include <cctype>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -24,8 +26,10 @@
 #include "elfldr_client.hpp"
 #include "log.hpp"
 #include "notify.hpp"
+#include "notify_text.hpp"
 #include "pkg_live_cache.hpp"
 #include "pkg_stream.hpp"
+#include "pkg_ws_upload.hpp"
 #include "process_manager.hpp"
 #include "ps5_services.hpp"
 
@@ -68,6 +72,90 @@ std::string PkgDisplayName(const std::string &path) {
     size_t slash = path.find_last_of('/');
     std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
     return name.empty() ? "PKG" : name;
+}
+
+// "Game.pkg" -> "Game", for toasts when the package header was not read.
+std::string ShortPkgName(std::string name) {
+    size_t query = name.find('?');
+    if (query != std::string::npos) name.resize(query);
+    name = PkgDisplayName(name);
+    if (name.size() > 4 && strcasecmp(name.c_str() + name.size() - 4, ".pkg") == 0) name.resize(name.size() - 4);
+    return name;
+}
+
+// Name and cover art for the console's install card, set for the duration of one queue call.
+std::mutex g_display_mu;
+std::string g_display_name;
+std::string g_display_cover_url;
+std::string g_staged_cover; // sent by the browser ahead of a live upload
+
+// Set once a plain install worked right after one with cover art was refused.
+bool g_cover_refused = false;
+
+// The cover stays served after the queue call: the console fetches it later, and the next install replaces it.
+struct DisplayScope {
+    DisplayScope(const std::string &name, const std::string &png) {
+        std::lock_guard<std::mutex> lock(g_display_mu);
+        g_display_name = g_cover_refused ? "" : name;
+        g_display_cover_url = g_cover_refused ? "" : SetPkgCover(png);
+    }
+    ~DisplayScope() {
+        std::lock_guard<std::mutex> lock(g_display_mu);
+        g_display_name.clear();
+    }
+};
+
+bool DisplayActive() {
+    std::lock_guard<std::mutex> lock(g_display_mu);
+    return !g_display_name.empty();
+}
+
+void DropDisplay() {
+    std::lock_guard<std::mutex> lock(g_display_mu);
+    g_display_name.clear();
+    g_display_cover_url.clear();
+}
+
+bool SlotBusy(const PkgInstallResult &r) {
+    if (r.ok) return false;
+    for (const char *code : {"0x80b2116f", "0x80b2100d", "0x80b2100e"}) {
+        if (r.error.find(code) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// The console often refuses these while it is still releasing the previous install, so it gets
+// two more tries, 2 s and 5 s later. The retries drop the cover art, in case that is what it dislikes.
+template <class Attempt>
+PkgInstallResult RetrySlotBusy(Attempt attempt) {
+    PkgInstallResult r = attempt();
+    bool dropped = false;
+    for (int wait : {2, 5}) {
+        if (!SlotBusy(r)) break;
+        if (DisplayActive()) {
+            DropDisplay();
+            dropped = true;
+        }
+        LogEvent("The console is not ready for this package yet; retrying in " + std::to_string(wait) + "s" +
+                 (dropped ? " without cover art" : ""));
+        std::this_thread::sleep_for(std::chrono::seconds(wait));
+        r = attempt();
+    }
+    if (r.ok && dropped) {
+        g_cover_refused = true;
+        LogEvent("The install only worked without cover art; cover art is off until Prospero restarts");
+    }
+    return r;
+}
+
+// The icon0.png inside a package on disk, empty when there is none.
+std::string ReadPkgIconFile(const std::string &path, const PkgMetadata &meta) {
+    if (meta.icon_size == 0) return "";
+    std::ifstream in(path, std::ios::binary);
+    std::string png(meta.icon_size, '\0');
+    in.seekg(meta.icon_offset);
+    in.read(png.data(), static_cast<std::streamsize>(png.size()));
+    return static_cast<uint32_t>(in.gcount()) == meta.icon_size ? png : "";
 }
 
 // Cheap sniff of the first bytes so a downloaded HTML page can be reported as
@@ -227,23 +315,33 @@ std::string JsonField(const std::string &text, const char *key) {
     return text.substr(open + 1, close - open - 1);
 }
 
-// "gp" is a patch, "ac"/"al"/"addcont" extra content; everything else is a base app.
-std::string CategoryKind(const std::string &category) {
-    if (category.rfind("gp", 0) == 0) return "update";
-    if (category.rfind("ac", 0) == 0 || category.rfind("al", 0) == 0 || category == "addcont") return "dlc";
-    if (category.empty()) return "";
-    return "base";
-}
+uint64_t ReadLe64(const unsigned char *p) { return uint64_t(ReadLe32(p)) | (uint64_t(ReadLe32(p + 4)) << 32); }
 
-// The PS5 container wraps the PS4-style CNT header; find whichever applies.
+// PS5 packages wrap the PS4-style CNT header in an FIH or LIH container; find where it starts.
 long long FindCntOffset(std::ifstream &f) {
-    unsigned char magic[4]{};
-    if (!ReadAt(f, 0, magic, sizeof(magic))) return -1;
-    if (std::memcmp(magic, "\x7f" "CNT", 4) == 0) return 0;
-    if (std::memcmp(magic, "\x7f" "FIH", 4) != 0) return -1;
-    if (ReadAt(f, 0x58, magic, sizeof(magic)) && std::memcmp(magic, "\x7f" "CNT", 4) == 0) return 0x58;
-    for (long long at = 0x40; at <= 0x2000; at += 0x10) {
-        if (ReadAt(f, at, magic, sizeof(magic)) && std::memcmp(magic, "\x7f" "CNT", 4) == 0) return at;
+    f.clear();
+    f.seekg(0, std::ios::end);
+    long long size = f.tellg();
+    unsigned char head[0x1000]{};
+    if (!ReadAt(f, 0, head, 0x100)) return -1;
+    size_t have = 0x100;
+    if (ReadAt(f, 0, head, sizeof(head))) have = sizeof(head);
+
+    auto is_cnt = [&](long long at) {
+        unsigned char magic[4]{};
+        return at >= 0 && at + 0x80 <= size && ReadAt(f, at, magic, sizeof(magic)) && std::memcmp(magic, "\x7f" "CNT", 4) == 0;
+    };
+    if (std::memcmp(head, "\x7f" "CNT", 4) == 0) return 0;
+    if (std::memcmp(head, "\x7f" "LIH", 4) == 0) {
+        long long at = static_cast<long long>(ReadLe64(head + 0x30));
+        return ReadLe16(head + 6) == 1 && at >= 0x80 && is_cnt(at) ? at : -1;
+    }
+    if (std::memcmp(head, "\x7f" "FIH", 4) != 0) return -1;
+    long long at = static_cast<long long>(ReadLe64(head + 0x58));
+    if (at > 0 && is_cnt(at)) return at;
+    for (size_t off = 0x10; off + 8 <= have; off += 8) {
+        at = static_cast<long long>(ReadLe64(head + off));
+        if (at >= 0x10000 && at % 0x1000 == 0 && is_cnt(at)) return at;
     }
     return -1;
 }
@@ -269,20 +367,49 @@ PkgMetadata ReadPkgMetadata(const std::string &path) {
     std::vector<unsigned char> table(size_t(count) * 32);
     if (!ReadAt(f, cnt + table_at, table.data(), table.size())) return out;
 
+    // Entries are told apart by type, or by name when the package carries a name table (type 0x0200).
+    std::string names;
+    for (uint32_t i = 0; i < count; i++) {
+        const unsigned char *e = table.data() + size_t(i) * 32;
+        uint32_t names_at = ReadBe32(e + 16);
+        uint32_t names_size = ReadBe32(e + 20);
+        if (ReadBe32(e) == 0x0200 && names_size > 0 && names_size < 65536) {
+            names.resize(names_size);
+            if (!ReadAt(f, cnt + names_at, names.data(), names.size())) names.clear();
+            break;
+        }
+    }
+
+    bool has_playgo = false, has_delta = false, has_base_meta = false, sfo_category = false;
     for (uint32_t i = 0; i < count; i++) {
         const unsigned char *e = table.data() + size_t(i) * 32;
         uint32_t type = ReadBe32(e);
+        uint32_t name_at = ReadBe32(e + 4);
         uint32_t data_at = ReadBe32(e + 16);
         uint32_t size = ReadBe32(e + 20);
+        std::string name = name_at < names.size() ? std::string(names.c_str() + name_at) : std::string();
+        if (type == 0x1008 || name == "app/playgo-chunk.dat") has_playgo = true;
+        if (type == 0x0407 || type == 0x0408 || name == "target-deltainfo.dat" || name == "origin-deltainfo.dat") has_delta = true;
+        if ((type == 0x1200 || name == "icon0.png") && size > 8 && size <= 10 * 1024 * 1024) {
+            out.icon_offset = cnt + data_at;
+            out.icon_size = size;
+            continue;
+        }
         // 256 KiB is far above any real param file and keeps a corrupt table cheap.
         if (size == 0 || size > 256 * 1024) continue;
 
-        if (type == 0x1000) { // param.sfo — PS4 titles
+        if (type == 0x1000 || name == "param.sfo") { // PS4 titles
             std::vector<unsigned char> sfo(size);
+            std::string before = out.category;
             if (ReadAt(f, cnt + data_at, sfo.data(), sfo.size())) ParseParamSfo(sfo, &out);
-        } else if (type == 0x2000) { // param.json — PS5 native titles
+            if (before.empty() && !out.category.empty()) sfo_category = true;
+        } else if (type == 0x2000 || name == "param.json") { // PS5 native titles
             std::string json(size, '\0');
             if (!ReadAt(f, cnt + data_at, json.data(), json.size())) continue;
+            if (json.find("\"applicationDrmType\"") != std::string::npos || json.find("\"applicationCategoryType\"") != std::string::npos ||
+                json.find("\"contentBadgeType\"") != std::string::npos) {
+                has_base_meta = true;
+            }
             if (out.title_name.empty()) out.title_name = JsonField(json, "titleName");
             if (out.title_id.empty()) out.title_id = JsonField(json, "titleId");
             if (out.version.empty()) out.version = JsonField(json, "contentVersion");
@@ -291,9 +418,99 @@ PkgMetadata ReadPkgMetadata(const std::string &path) {
     }
 
     if (out.content_id.size() >= 20 && out.title_id.empty()) out.title_id = out.content_id.substr(7, 9);
-    out.category = CategoryKind(out.category);
+    // Base, update or DLC the way the console's own package manager decides: the category alone is not
+    // enough, since PS5 updates and DLC are also told apart by header flags and patch entries.
+    uint32_t type_magic = ReadBe32(header + 4);
+    uint32_t flags = ReadBe32(header + 0x78);
+    unsigned char container[4]{};
+    bool is_lih = ReadAt(f, 0, container, sizeof(container)) && std::memcmp(container, "\x7f" "LIH", 4) == 0;
+    bool delta = (type_magic & 0xff) == 0x1e || (type_magic & 0xff000000) == 0x41000000;
+    const std::string &cat = out.category;
+    auto starts = [&](const char *prefix) { return cat.rfind(prefix, 0) == 0; };
+    if (is_lih || (flags & 0x40100000) || has_playgo || has_delta || delta || starts("gp")) out.category = "update";
+    else if (starts("ac") || starts("al") || cat == "addcont") out.category = "dlc";
+    else if (sfo_category && (starts("gd") || starts("bd") || starts("gc") || starts("wt"))) out.category = "base";
+    else if ((type_magic & 0xff) == 1 && !has_base_meta) out.category = "dlc";
+    else out.category = "base";
     return out;
 }
+
+
+namespace {
+
+bool SafeTitleId(const std::string &id) {
+    if (id.size() < 9 || id.size() > 16) return false;
+    for (char c : id) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') return false;
+    }
+    return true;
+}
+
+// Dotted versions compare part by part as numbers: "01.05" < "01.10".
+int CompareVersions(const std::string &a, const std::string &b) {
+    size_t i = 0, j = 0;
+    while (i < a.size() || j < b.size()) {
+        long x = 0, y = 0;
+        while (i < a.size() && a[i] != '.') x = x * 10 + (std::isdigit(static_cast<unsigned char>(a[i])) ? a[i] - '0' : 0), i++;
+        while (j < b.size() && b[j] != '.') y = y * 10 + (std::isdigit(static_cast<unsigned char>(b[j])) ? b[j] - '0' : 0), j++;
+        if (x != y) return x < y ? -1 : 1;
+        i++;
+        j++;
+    }
+    return 0;
+}
+
+// Version from an installed param.json or param.sfo; false when the file is missing.
+bool ReadInstalledVersion(const std::string &path, std::string *version) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (data.size() > 256 * 1024) return false;
+    PkgMetadata meta;
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, ".json") == 0) {
+        meta.version = JsonField(data, "contentVersion");
+    } else {
+        ParseParamSfo(std::vector<unsigned char>(data.begin(), data.end()), &meta);
+    }
+    *version = meta.version;
+    return true;
+}
+
+} // namespace
+
+InstalledTitle FindInstalledTitle(const std::string &title_id) {
+    InstalledTitle out;
+    if (!SafeTitleId(title_id)) return out;
+    const char *bases[] = {"/user/app/", "/system_ex/app/", "/mnt/ext0/user/app/", "/mnt/ext1/user/app/"};
+    for (const char *base : bases) {
+        std::string dir = std::string(base) + title_id;
+        std::string version;
+        bool found = ReadInstalledVersion(dir + "/sce_sys/param.json", &version) ||
+                     ReadInstalledVersion(dir + "/sce_sys/param.sfo", &version);
+        struct stat st {};
+        if (!found && stat((dir + "/eboot.bin").c_str(), &st) == 0) found = true;
+        if (!found) continue;
+        out.installed = true;
+        if (CompareVersions(version, out.version) > 0) out.version = version;
+    }
+    // A patch folder on its own does not mean the game is there, so these only raise the version.
+    if (!out.installed) return out;
+    const char *patches[] = {"/user/patch/", "/user/patch0/", "/system_data/priv/appmeta/"};
+    for (const char *base : patches) {
+        for (const char *name : {"/sce_sys/param.json", "/sce_sys/param.sfo", "/param.json", "/param.sfo"}) {
+            std::string version;
+            if (ReadInstalledVersion(std::string(base) + title_id + name, &version) &&
+                CompareVersions(version, out.version) > 0) {
+                out.version = version;
+            }
+        }
+    }
+    return out;
+}
+
+namespace {
+std::atomic<bool> g_pkg_cancel{false};
+} // namespace
 
 bool PkgDownloadToTemp(const Config &cfg, const std::string &url, std::string *local_path, std::string *err,
                        const std::function<void(long long, long long)> &progress) {
@@ -309,7 +526,8 @@ bool PkgDownloadToTemp(const Config &cfg, const std::string &url, std::string *l
     if (base.size() < 4 || base.compare(base.size() - 4, 4, ".pkg") != 0) base += ".pkg";
 
     std::string dest = dir + "/" + base;
-    if (!HttpsClient::DownloadToFile(download_url, dest, err, progress)) {
+    if (!HttpsClient::DownloadToFile(download_url, dest, err, progress, nullptr,
+                                     [] { return g_pkg_cancel.load(); })) {
         std::remove(dest.c_str());
         return false;
     }
@@ -373,6 +591,10 @@ bool DeleteStagedPkgFile(const Config &cfg, std::string *err) {
     return true;
 }
 
+namespace {
+void TrackSystemInstall(const std::string &content_id);
+} // namespace
+
 bool StartPkgInstallJob(const Config &cfg, const std::string &url, const std::string &path, std::string *err) {
     {
         std::lock_guard<std::mutex> lock(g_job_mu);
@@ -381,6 +603,7 @@ bool StartPkgInstallJob(const Config &cfg, const std::string &url, const std::st
             return false;
         }
         g_job_running = true;
+        g_pkg_cancel = false;
         g_job = PkgJobStatus{};
         g_job.phase = url.empty() ? PkgJobPhase::kInstalling : PkgJobPhase::kDownloading;
     }
@@ -398,13 +621,23 @@ bool StartPkgInstallJob(const Config &cfg, const std::string &url, const std::st
                         std::lock_guard<std::mutex> lock(g_job_mu);
                         g_job.phase = PkgJobPhase::kInstalling;
                     }
-                    PkgInstallResult streamed = InstallPkgUri(cfg, stream_uri);
+                    DisplayScope display(ShortPkgName(url), "");
+                    PkgInstallResult streamed = RetrySlotBusy([&]() {
+                        PkgInstallResult x = InstallPkgUri(cfg, stream_uri);
+                        if (SlotBusy(x)) {
+                            StopPkgStream(stream_uri);
+                            std::string ignored;
+                            StartRemotePkgStream(url, &stream_uri, &ignored);
+                        }
+                        return x;
+                    });
                     if (streamed.ok) {
                         std::lock_guard<std::mutex> lock(g_job_mu);
                         g_job.phase = PkgJobPhase::kQueued;
                         g_job.content_id = streamed.content_id;
                         g_job_running = false;
-                        Notify("Prospero Manager\nInstall queued");
+                        TrackSystemInstall(streamed.content_id);
+                        Notify("Prospero Manager\n" + NotifyText(Msg::kInstallQueued, {{"name", ShortPkgName(url)}}));
                         return;
                     }
                     LogEvent("Streamed install rejected (" + streamed.error + "); downloading instead");
@@ -442,7 +675,7 @@ bool StartPkgInstallJob(const Config &cfg, const std::string &url, const std::st
                 if (!ok) {
                     std::lock_guard<std::mutex> lock(g_job_mu);
                     g_job.phase = PkgJobPhase::kError;
-                    g_job.error = "download failed: " + derr;
+                    g_job.error = g_pkg_cancel ? "canceled" : "download failed: " + derr;
                     g_job_running = false;
                     return;
                 }
@@ -452,6 +685,16 @@ bool StartPkgInstallJob(const Config &cfg, const std::string &url, const std::st
                 std::lock_guard<std::mutex> lock(g_job_mu);
                 g_job.phase = PkgJobPhase::kInstalling;
                 if (IsManagedPkgFile(cfg, local_path)) g_job.staged_path = local_path;
+            }
+
+            if (g_pkg_cancel) {
+                RemoveManagedPkgFile(cfg, local_path);
+                std::lock_guard<std::mutex> lock(g_job_mu);
+                g_job.staged_path.clear();
+                g_job.phase = PkgJobPhase::kError;
+                g_job.error = "canceled";
+                g_job_running = false;
+                return;
             }
 
             std::string content_id;
@@ -475,8 +718,11 @@ bool StartPkgInstallJob(const Config &cfg, const std::string &url, const std::st
                 std::lock_guard<std::mutex> lock(g_job_mu);
                 g_job.title = title;
             }
-            Notify("Prospero Manager\nInstalling: " + title);
-            PkgInstallResult r = InstallPkgFile(cfg, local_path);
+            Notify("Prospero Manager\n" + NotifyText(Msg::kInstalling, {{"name", title}}));
+            std::string cover = ReadPkgIconFile(local_path, meta);
+            DisplayScope display(title, cover);
+            PkgInstallResult r = RetrySlotBusy([&]() { return InstallPkgFile(cfg, local_path); });
+            if (r.ok) TrackSystemInstall(r.content_id);
 
             {
                 std::lock_guard<std::mutex> lock(g_job_mu);
@@ -491,7 +737,7 @@ bool StartPkgInstallJob(const Config &cfg, const std::string &url, const std::st
             }
             // Sony's notification service must not hold the status lock;
             // progress polling stays responsive while the toast is sent.
-            if (r.ok) Notify("Prospero Manager\nInstall queued: " + title);
+            if (r.ok) NotifyWithImage("Prospero Manager\n" + NotifyText(Msg::kInstallQueued, {{"name", title}}), cover);
         } catch (const std::exception &e) {
             std::lock_guard<std::mutex> lock(g_job_mu);
             g_job.phase = PkgJobPhase::kError;
@@ -546,6 +792,18 @@ void StopPkgHelper() {
         if (process.name != kPkgHelperName) continue;
         std::string ignored;
         (void)KillProcess(process.pid, &ignored);
+    }
+}
+
+// A rejected install leaves sceAppInstUtil unusable inside that process, so the retry
+// (e.g. the file-path fallback) needs a fresh helper. Waits for the port to free up.
+void RestartPkgHelper() {
+    StopPkgHelper();
+    for (int i = 0; i < 50; i++) {
+        int fd = -1;
+        if (!ConnectPkgHelper(&fd)) return;
+        close(fd);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
@@ -633,8 +891,8 @@ bool WaitForPkgHelper(std::chrono::steady_clock::time_point deadline, std::strin
     return false;
 }
 
-HelperAttempt QueueWithPkgHelper(const Config &cfg, const std::string &uri) {
-    HelperAttempt attempt;
+// Starts the private service if needed and waits until it is ready.
+bool EnsurePkgHelperReady(const Config &cfg, std::string *err) {
     std::string status;
     std::string probe_error;
     std::string probe_response;
@@ -643,31 +901,70 @@ HelperAttempt QueueWithPkgHelper(const Config &cfg, const std::string &uri) {
         if (probe_response.rfind("ready", 0) == 0) {
             status = std::move(probe_response);
         } else if (probe_response.rfind("error:", 0) == 0) {
-            attempt.error = std::move(probe_response);
-            return attempt;
+            *err = std::move(probe_response);
+            return false;
         } else if (!WaitForPkgHelper(std::chrono::steady_clock::now() + std::chrono::seconds(45), &status,
-                                     &attempt.error)) {
-            return attempt;
+                                     err)) {
+            return false;
         }
     } else if (probe_connected) {
-        attempt.error = "an existing private PKG service accepted the status connection but did not answer: " +
+        *err = "an existing private PKG service accepted the status connection but did not answer: " +
                         probe_error;
-        return attempt;
+        return false;
     } else {
         std::string helper_path = cfg.bundled_dir + "/" + kPkgHelperName;
         ElfldrClient loader(Config::kElfldrHost, Config::kElfldrPort);
         std::string launch_error;
         if (!loader.LaunchFile(helper_path, &launch_error)) {
-            attempt.error = "could not launch private PKG service: " + launch_error;
-            return attempt;
+            *err = "could not launch private PKG service: " + launch_error;
+            return false;
         }
         LogEvent("Private PKG service launch sent; waiting for initialization");
         if (!WaitForPkgHelper(std::chrono::steady_clock::now() + std::chrono::seconds(45), &status,
-                              &attempt.error)) {
-            return attempt;
+                              err)) {
+            return false;
         }
     }
+    return true;
+}
 
+HelperAttempt QueueWithPkgHelper(const Config &cfg, const std::string &uri) {
+    HelperAttempt attempt;
+    if (!EnsurePkgHelperReady(cfg, &attempt.error)) return attempt;
+
+    std::string name, cover;
+    {
+        std::lock_guard<std::mutex> lock(g_display_mu);
+        name = g_display_name;
+        cover = g_display_cover_url;
+    }
+    if (!name.empty()) {
+        // A service from an older build does not know this command, so a refusal just falls back to the plain one.
+        for (char &c : name) if (static_cast<unsigned char>(c) < 0x20) c = ' ';
+        if (name.size() > 100) {
+            name.resize(100);
+            while (!name.empty() && (static_cast<unsigned char>(name.back()) & 0xC0) == 0x80) name.pop_back();
+            if (!name.empty()) name.pop_back();
+        }
+        LogEvent("Queueing with the name '" + name + "' and cover art " + (cover.empty() ? "(none)" : cover));
+        std::string rich, rich_error;
+        if (ExchangePkgHelperCommand("install-meta:" + cover + "\t" + name + "\t" + uri, 45, &rich, &rich_error) &&
+            rich.rfind("ok", 0) == 0) {
+            attempt.response = rich;
+            attempt.queued = true;
+            return attempt;
+        }
+        if (rich.find("0x80b2116f") != std::string::npos) {
+            // The caller retries this one later with a fresh service.
+            attempt.error = rich;
+            RestartPkgHelper();
+            return attempt;
+        }
+        g_cover_refused = true;
+        LogEvent("Install with cover art was refused (" + (rich.empty() ? rich_error : rich) + "); queueing without it");
+        RestartPkgHelper();
+        if (!EnsurePkgHelperReady(cfg, &attempt.error)) return attempt;
+    }
     std::string exchange_error;
     if (!ExchangePkgHelperCommand(uri, 45, &attempt.response, &exchange_error)) {
         attempt.error = std::move(exchange_error);
@@ -678,6 +975,7 @@ HelperAttempt QueueWithPkgHelper(const Config &cfg, const std::string &uri) {
         return attempt;
     }
     attempt.error = attempt.response;
+    RestartPkgHelper();
     return attempt;
 }
 
@@ -701,19 +999,60 @@ bool QueryHelperInstallStatus(const std::string &content_id, std::string *status
 void MonitorLiveInstall(const std::string &content_id, const std::string &uri) {
     constexpr int kPollSeconds = 2;
     constexpr int kSettleSeconds = 3; // avoids trusting a stale status right at stream-done
+    constexpr int kIdleSeconds = 10; // The installer may finish without reading every byte.
+    constexpr int kNoStatusSeconds = 120;
     constexpr int kMaxMinutes = 90;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(kMaxMinutes);
     bool stream_done = false;
+    int poll_count = 0;
     std::chrono::steady_clock::time_point stream_done_at{};
+    uint64_t last_served = 0;
+    uint64_t last_logged_served = 0;
+    uint64_t last_logged_received = 0;
+    uint64_t last_logged_wait_us = 0;
+    uint64_t last_logged_recv_wait = 0;
+    auto last_logged_at = std::chrono::steady_clock::now();
+    auto last_read_at = std::chrono::steady_clock::now();
 
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(kPollSeconds));
         PkgLiveStatus live = PkgLiveCache::GetStatus();
         if (!live.active || live.aborted) break;
 
-        if (!stream_done && live.total > 0 && live.served >= live.total) {
+        // A progress line every few seconds, so a stall in a long install shows up in the log.
+        if (++poll_count % 3 == 0 && !stream_done) {
+            auto logged_now = std::chrono::steady_clock::now();
+            uint64_t recv_wait = PkgWsRecvWaitMicros();
+            double seconds = std::chrono::duration<double>(logged_now - last_logged_at).count();
+            auto rate = [seconds](uint64_t now, uint64_t before) {
+                return std::to_string(seconds > 0 ? static_cast<long long>((now - before) / seconds / (1024 * 1024)) : 0);
+            };
+            LogEvent("[pkglive] sent " + std::to_string(live.received >> 20) + " MB (" + rate(live.received, last_logged_received) +
+                     " MB/s), read " + std::to_string(live.served >> 20) + " MB (" + rate(live.served, last_logged_served) +
+                     " MB/s), readers waiting " + std::to_string(static_cast<int>(
+                         seconds > 0 ? (live.reader_wait_us - last_logged_wait_us) / 1e6 / seconds * 10 : 0) / 10.0).substr(0, 3) +
+                     " on avg, reader at segment " + std::to_string(live.reader_seg) + ", cache " + std::to_string(live.resident) +
+                     "/" + std::to_string(live.slots) + ", busy " + std::to_string(live.busy_replies) + ", resends " +
+                     std::to_string(live.resend_requests) + ", on the wire " + std::to_string(live.wire_bytes >> 20) +
+                     " MB, duplicates " + std::to_string(live.duplicates) + ", evicted unread " +
+                     std::to_string(live.evicted_unread) + ", waiting on the browser " +
+                     std::to_string(static_cast<int>(seconds > 0 ? (recv_wait - last_logged_recv_wait) / 1e4 / seconds : 0)) + "%");
+            last_logged_at = logged_now;
+            last_logged_received = live.received;
+            last_logged_served = live.served;
+            last_logged_wait_us = live.reader_wait_us;
+            last_logged_recv_wait = recv_wait;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (live.served != last_served) {
+            last_served = live.served;
+            last_read_at = now;
+        }
+        bool reader_idle = now - last_read_at >= std::chrono::seconds(kIdleSeconds);
+        if (!stream_done && live.total > 0 && (live.served >= live.total || (live.received >= live.total && reader_idle))) {
             stream_done = true;
-            stream_done_at = std::chrono::steady_clock::now();
+            stream_done_at = now;
             LogEvent("[pkglive] stream fully delivered; waiting for the system to finalize the install");
         }
 
@@ -725,8 +1064,14 @@ void MonitorLiveInstall(const std::string &content_id, const std::string &uri) {
             break;
         }
         if (have_status && stream_done && (status == "playable" || status == "completed") &&
-            std::chrono::steady_clock::now() - stream_done_at >= std::chrono::seconds(kSettleSeconds)) {
-            LogEvent("[pkglive] system install finished; releasing the live cache");
+            now - stream_done_at >= std::chrono::seconds(kSettleSeconds)) {
+            LogEvent("[pkglive] system install finished " +
+                     std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now - stream_done_at).count()) +
+                     "s after the last byte was read; releasing the live cache");
+            break;
+        }
+        if (stream_done && !have_status && now - stream_done_at >= std::chrono::seconds(kNoStatusSeconds)) {
+            LogEvent("[pkglive] no completion status after the stream ended; releasing the live cache");
             break;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
@@ -740,15 +1085,81 @@ void MonitorLiveInstall(const std::string &content_id, const std::string &uri) {
     PkgLiveCache::Destroy();
 }
 
+// Installs the system is still working on after Prospero handed them over. Counted so a
+// scheduled power action waits for them instead of cutting the install off.
+std::atomic<int> g_system_installs{0};
+
+// Polls the system until it reports the install finished or failed. Gives up after 90 minutes,
+// or once the installer service stops answering, so a lost install can't block the console forever.
+void TrackSystemInstall(const std::string &content_id) {
+    if (content_id.empty()) return;
+    g_system_installs++;
+    StartBackgroundThread([content_id]() {
+        auto started = std::chrono::steady_clock::now();
+        auto deadline = started + std::chrono::minutes(90);
+        std::string last_status;
+        int unanswered = 0;
+        while (std::chrono::steady_clock::now() < deadline && unanswered < 20) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            std::string status;
+            int error_code = 0;
+            if (!QueryHelperInstallStatus(content_id, &status, &error_code)) {
+                unanswered++;
+                continue;
+            }
+            unanswered = 0;
+            if (status != last_status) {
+                LogEvent("PKG install status: " + status);
+                last_status = status;
+            }
+            if (status == "error" || error_code != 0 || status == "playable" || status == "completed") {
+                long long seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count();
+                LogEvent("PKG install " + std::string(error_code != 0 || status == "error" ? "failed" : "finished") +
+                         " after " + std::to_string(seconds) + "s");
+                break;
+            }
+        }
+        g_system_installs--;
+    });
+}
+
 // Sony's installer refuses some packages outright, so point at the console's own
 // installer rather than leaving the raw code on screen.
 std::string PkgRejectionHint(const std::string &helper_error) {
+    if (helper_error.find("0x80b21104") != std::string::npos || helper_error.find("0x80a30002") != std::string::npos) {
+        return " — not enough free space on the console. Free some space or move games to the extended storage";
+    }
     if (helper_error.find("0x80b2116f") == std::string::npos) return "";
-    return " — the console's package service rejected this package. The download was kept, so you can install it "
-           "from Settings > System > Debug Settings > Game > Package Installer";
+    return " — the console refuses this package. Either it already has the game (delete it from the "
+           "console's storage settings first), or it is still finishing the previous install (wait a minute and try again). "
+           "You can also install from Settings > System > Debug Settings > Game > Package Installer";
 }
 
 } // namespace
+
+bool UninstallTitle(const Config &cfg, const std::string &title_id, std::string *err) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        std::string error;
+        if (!EnsurePkgHelperReady(cfg, &error)) {
+            if (err) *err = error;
+            return false;
+        }
+        std::string response;
+        if (!ExchangePkgHelperCommand("uninstall:" + title_id, 30, &response, &error)) {
+            if (err) *err = error;
+            return false;
+        }
+        if (response.rfind("ok", 0) == 0) return true;
+        // A service left running by an older build may not know this command or its fixes, so restart it once.
+        if (attempt == 0 && response.rfind("error:", 0) == 0) {
+            RestartPkgHelper();
+            continue;
+        }
+        if (err) *err = "the console refused to uninstall it (" + response + ")";
+        return false;
+    }
+    return false;
+}
 
 PkgInstallResult InstallPkgUri(const Config &cfg, const std::string &uri) {
     PkgInstallResult r;
@@ -805,6 +1216,12 @@ PkgInstallResult InstallPkgFile(const Config &cfg, const std::string &path) {
     return r;
 }
 
+void StagePkgCover(const std::string &png) {
+    std::lock_guard<std::mutex> lock(g_display_mu);
+    g_staged_cover = png.size() <= 2 * 1024 * 1024 ? png : "";
+    LogEvent("Cover art from the browser: " + std::to_string(g_staged_cover.size()) + " bytes");
+}
+
 bool StartPkgInstallJobFromLiveSession(const Config &cfg, const std::string &session_id, std::string *err) {
     {
         std::lock_guard<std::mutex> lock(g_job_mu);
@@ -825,10 +1242,31 @@ bool StartPkgInstallJobFromLiveSession(const Config &cfg, const std::string &ses
                 g_job.phase = PkgJobPhase::kError;
                 g_job.error = "could not start the live stream: " + stream_err;
                 g_job_running = false;
+                PkgLiveCache::Abort();
+                PkgLiveCache::Destroy();
                 return;
             }
 
-            PkgInstallResult r = InstallPkgUri(cfg, uri);
+            PkgInstallResult r;
+            std::string cover;
+            {
+                PkgLiveStatus starting = PkgLiveCache::GetStatus();
+                {
+                    std::lock_guard<std::mutex> lock(g_display_mu);
+                    cover = std::move(g_staged_cover);
+                    g_staged_cover.clear();
+                }
+                DisplayScope display(!starting.title.empty() ? starting.title : ShortPkgName(starting.filename), cover);
+                r = RetrySlotBusy([&]() {
+                    PkgInstallResult x = InstallPkgUri(cfg, uri);
+                    if (SlotBusy(x)) {
+                        StopPkgStream(uri);
+                        std::string ignored;
+                        StartLivePkgStream(session_id, &uri, &ignored);
+                    }
+                    return x;
+                });
+            }
             {
                 std::lock_guard<std::mutex> lock(g_job_mu);
                 if (r.ok) {
@@ -848,7 +1286,14 @@ bool StartPkgInstallJobFromLiveSession(const Config &cfg, const std::string &ses
             }
             // Sony's notification service must not hold the status lock; progress
             // polling stays responsive while the toast is sent.
-            Notify("Prospero Manager\nInstall queued");
+            TrackSystemInstall(r.content_id);
+            PkgLiveStatus queued = PkgLiveCache::GetStatus();
+            std::string name = !queued.title.empty() ? queued.title : ShortPkgName(queued.filename);
+            {
+                std::lock_guard<std::mutex> lock(g_job_mu);
+                g_job.title = name;
+            }
+            NotifyWithImage("Prospero Manager\n" + NotifyText(Msg::kInstallQueued, {{"name", name}}), cover);
             MonitorLiveInstall(r.content_id, uri);
         } catch (const std::exception &e) {
             std::lock_guard<std::mutex> lock(g_job_mu);
@@ -864,6 +1309,19 @@ bool StartPkgInstallJobFromLiveSession(const Config &cfg, const std::string &ses
     });
 
     return true;
+}
+
+bool PkgInstallBusy() {
+    {
+        std::lock_guard<std::mutex> lock(g_job_mu);
+        if (g_job_running) return true;
+    }
+    return PkgLiveCache::SessionActive() || g_system_installs.load() > 0;
+}
+
+void CancelPkgInstall() {
+    g_pkg_cancel = true;
+    CancelLivePkgInstall();
 }
 
 void CancelLivePkgInstall() {

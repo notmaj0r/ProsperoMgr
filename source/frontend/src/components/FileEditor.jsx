@@ -84,7 +84,7 @@ export default function FileEditor({ path, onClose, onSaved }) {
 
   return createPortal(
     <>
-      <div className={`pmgr-modal-overlay items-stretch p-0 sm:items-center sm:p-4 ${closing ? 'is-closing' : ''}`} onClick={requestClose}>
+      <div className={`pmgr-modal-overlay !items-stretch !p-0 sm:!items-center sm:!p-4 ${closing ? 'is-closing' : ''}`} onClick={requestClose}>
         <div
           ref={containerRef}
           role="dialog"

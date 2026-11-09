@@ -77,9 +77,13 @@ typedef struct {
     _Bool is_copy_only;
 } pkg_install_status_t;
 
+extern int sceNetInit(void);
+extern int sceNetCtlInit(void);
+extern int sceUserServiceInitialize(int *priority);
 extern int sceAppInstUtilInitialize(void);
 extern int sceAppInstUtilInstallByPackage(pkg_meta_t *, pkg_info_t *, pkg_playgo_t *);
 extern int sceAppInstUtilGetInstallStatus(const char *content_id, pkg_install_status_t *status);
+extern int sceAppInstUtilAppUnInstall(const char *title_id);
 
 typedef enum {
     HELPER_STARTING = 0,
@@ -338,6 +342,14 @@ static void reply_install_status(int client, const char *content_id) {
     (void)send_all(client, response);
 }
 
+// "PPSA01234" / "CUSA01234": four capitals and five digits, nothing else reaches the uninstall call.
+static int title_id_is_safe(const char *id) {
+    if (strlen(id) != 9) return 0;
+    for (int i = 0; i < 4; i++) if (id[i] < 'A' || id[i] > 'Z') return 0;
+    for (int i = 4; i < 9; i++) if (id[i] < '0' || id[i] > '9') return 0;
+    return 1;
+}
+
 static int path_is_safe(const char *path) {
     if (!path) return 0;
     // A stream URI is handed to the installer verbatim; only local paths get the
@@ -357,6 +369,54 @@ static void normalize_path(const char *input, char *output, size_t capacity) {
     }
     strncpy(output, input, capacity - 1);
     output[capacity - 1] = '\0';
+}
+
+static void queue_install(int client, const helper_snapshot_t *snapshot, const char *request,
+                          const char *icon_url, const char *name) {
+    // The system reads these after the call returns, so they must outlive this function.
+    static char uri[4102];
+    static char name_copy[128];
+    static char icon_copy[256];
+    static pkg_meta_t meta;
+    static pkg_info_t info;
+    static pkg_playgo_t playgo;
+    snprintf(name_copy, sizeof(name_copy), "%s", name);
+    snprintf(icon_copy, sizeof(icon_copy), "%s", icon_url);
+    normalize_path(request, uri, sizeof(uri));
+    const char *package_name = filename_from_path(uri);
+    log_event("Queueing package: %s", package_name);
+
+    memset(&meta, 0, sizeof(meta));
+    memset(&info, 0, sizeof(info));
+    memset(&playgo, 0, sizeof(playgo));
+    meta.uri = uri;
+    meta.ex_uri = "";
+    meta.playgo_scenario_id = "";
+    meta.content_id = "";
+    // Sony's own install card shows this name and cover art.
+    meta.content_name = name_copy;
+    meta.icon_url = icon_copy;
+
+    // Firmware 11 and newer queue under SYSTEM; older ones only take a local
+    // package under ShellCore, so lend the call that authid and hand it back.
+    pid_t self = getpid();
+    uint64_t saved_authid = prospero_pkg_needs_shellcore_authid(snapshot->firmware_major)
+                                ? kernel_get_ucred_authid(self)
+                                : 0;
+    if (saved_authid) kernel_set_ucred_authid(self, PROSPERO_PKG_SHELLCORE_AUTHID);
+    int queue_rc = sceAppInstUtilInstallByPackage(&meta, &info, &playgo);
+    if (saved_authid) kernel_set_ucred_authid(self, saved_authid);
+    if (queue_rc == 0) {
+        char response[80];
+        size_t content_len = strnlen(info.content_id, sizeof(info.content_id));
+        snprintf(response, sizeof(response), "ok:%.*s", (int)content_len, info.content_id);
+        (void)send_all(client, response);
+        log_event("Package accepted: %.*s", (int)content_len, info.content_id);
+    } else {
+        log_event("Package queue failed: %s (0x%08x)", package_name, (unsigned)queue_rc);
+        reply_error(client, "queue", queue_rc);
+    }
+    close(client);
 }
 
 int main(void) {
@@ -383,6 +443,13 @@ int main(void) {
     }
     log_event("Private PKG service started (PID %d)", (int)getpid());
     log_event("Listening for package requests on port %d", PROSPERO_PKGD_PORT);
+
+    // The console's install card fetches its cover art over the network, so these come up first.
+    int user_priority = 256;
+    int netctl_rc = sceNetCtlInit();
+    int user_rc = sceUserServiceInitialize(&user_priority);
+    int net_rc = sceNetInit();
+    log_event("Network services initialized (0x%08x, 0x%08x, 0x%08x)", (unsigned)netctl_rc, (unsigned)user_rc, (unsigned)net_rc);
 
     pthread_t initializer;
     int thread_rc = pthread_create(&initializer, NULL, initialize_service, NULL);
@@ -444,6 +511,38 @@ int main(void) {
             close(client);
             continue;
         }
+        if (strncmp(request, "uninstall:", 10) == 0) {
+            const char *title_id = request + 10;
+            if (!title_id_is_safe(title_id)) {
+                reply_error(client, "uninstall", -1);
+            } else {
+                int uninstall_rc = sceAppInstUtilAppUnInstall(title_id);
+                log_event("Uninstall requested: %s (0x%08x)", title_id, (unsigned)uninstall_rc);
+                if (uninstall_rc == 0) (void)send_all(client, "ok:uninstall");
+                else reply_error(client, "uninstall", uninstall_rc);
+            }
+            close(client);
+            continue;
+        }
+        if (strncmp(request, "install-meta:", 13) == 0) {
+            // install-meta:<icon url>\t<name>\t<uri>, the cover art and name for the install card.
+            char *icon = request + 13;
+            char *name = strchr(icon, '\t');
+            char *uri = name ? strchr(name + 1, '\t') : NULL;
+            if (name) *name++ = '\0';
+            if (uri) *uri++ = '\0';
+            int valid = uri && path_is_safe(uri) && strlen(name) <= 100 && strlen(icon) < 200 &&
+                        (icon[0] == '\0' || strncmp(icon, "http://127.0.0.1:9045/stream/install/icon-", 42) == 0);
+            for (const char *c = valid ? icon : ""; *c; c++) if ((unsigned char)*c < 0x20) valid = 0;
+            for (const char *c = valid ? name : ""; *c; c++) if ((unsigned char)*c < 0x20) valid = 0;
+            if (!valid) {
+                reply_error(client, "request", -1);
+                close(client);
+                continue;
+            }
+            queue_install(client, &snapshot, uri, icon, name[0] ? name : "Prospero Manager");
+            continue;
+        }
         if (!path_is_safe(request)) {
             reply_error(client, "request", -1);
             log_event("Package request rejected — unsafe path");
@@ -451,46 +550,7 @@ int main(void) {
             continue;
         }
 
-        char uri[4102];
-        normalize_path(request, uri, sizeof(uri));
-        const char *package_name = filename_from_path(uri);
-        log_event("Queueing package: %s", package_name);
-
-        pkg_meta_t meta;
-        pkg_info_t info;
-        pkg_playgo_t playgo;
-        memset(&meta, 0, sizeof(meta));
-        memset(&info, 0, sizeof(info));
-        memset(&playgo, 0, sizeof(playgo));
-        meta.uri = uri;
-        meta.ex_uri = "";
-        meta.playgo_scenario_id = "";
-        meta.content_id = "";
-        // Sony's own install notification shows this name, so keep it ours.
-        meta.content_name = "Prospero Manager";
-        // A non-empty icon_url makes the installer reject the package with 0x80b2116f.
-        meta.icon_url = "";
-
-        // Firmware 11 and newer queue under SYSTEM; older ones only take a local
-        // package under ShellCore, so lend the call that authid and hand it back.
-        pid_t self = getpid();
-        uint64_t saved_authid = prospero_pkg_needs_shellcore_authid(snapshot.firmware_major)
-                                    ? kernel_get_ucred_authid(self)
-                                    : 0;
-        if (saved_authid) kernel_set_ucred_authid(self, PROSPERO_PKG_SHELLCORE_AUTHID);
-        int queue_rc = sceAppInstUtilInstallByPackage(&meta, &info, &playgo);
-        if (saved_authid) kernel_set_ucred_authid(self, saved_authid);
-        if (queue_rc == 0) {
-            char response[80];
-            size_t content_len = strnlen(info.content_id, sizeof(info.content_id));
-            snprintf(response, sizeof(response), "ok:%.*s", (int)content_len, info.content_id);
-            (void)send_all(client, response);
-            log_event("Package accepted: %.*s", (int)content_len, info.content_id);
-        } else {
-            log_event("Package queue failed: %s (0x%08x)", package_name, (unsigned)queue_rc);
-            reply_error(client, "queue", queue_rc);
-        }
-        close(client);
+        queue_install(client, &snapshot, request, "", "Prospero Manager");
     }
 
     log_event("Private PKG service stopped");

@@ -14,6 +14,7 @@ struct HttpsResponse {
 // loaded/total in bytes — total is -1 if the server never sent a length
 // (chunked transfer or no Content-Length header at all).
 using DownloadProgressFn = std::function<void(long long loaded, long long total)>;
+using DownloadCancelFn = std::function<bool()>;
 
 // Coarse classification, enough to give the user a real reason instead of one
 // generic string. sceHttp reports DNS, TCP and TLS failures as one kind.
@@ -35,10 +36,11 @@ class HttpsClient {
     // Streams the body to a local file with a stall timeout, unlike Get() —
     // always prefer this over buffering a download in memory.
     static bool DownloadToFile(const std::string &url, const std::string &local_path, std::string *err,
-                               const DownloadProgressFn &progress = nullptr, NetErrorKind *kind = nullptr);
+                               const DownloadProgressFn &progress = nullptr, NetErrorKind *kind = nullptr,
+                               const DownloadCancelFn &cancel = nullptr);
 };
 
-// Stops the obsolete network helper left behind by an older ProsperoMgr build.
+// Stops the network helper that older builds left running.
 void ResetNetworkHelper();
 
 } // namespace prospero

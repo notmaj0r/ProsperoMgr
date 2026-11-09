@@ -1,12 +1,25 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDismiss } from '../lib/useDismiss.js'
 import { useAnchoredPosition } from '../lib/useAnchoredPosition.js'
 import { useI18n } from '../lib/i18n.jsx'
+import { pushBackLayer } from '../lib/backLayer.js'
+import { isPS5 } from '../lib/effects.js'
 
-// "More" menu for a row/tile with too many actions — desktop gets an anchored popover that
-// flips/clamps to viewport, narrow layouts get a bottom sheet. `items`: falsy entries skipped, '-' is a divider.
-export default function ActionMenu({ items, label, align = 'right' }) {
+// Right-clicking inside an element marked data-menu-host opens the ActionMenu that lives in that
+// element, at the pointer, so every list and card gets the same menu as its "more" button.
+const hostMenus = new WeakMap()
+document.addEventListener('contextmenu', (event) => {
+  const host = event.target.closest?.('[data-menu-host]')
+  const openAt = host && hostMenus.get(host)
+  if (!openAt || event.target.closest('input, textarea, select, a')) return
+  event.preventDefault()
+  openAt(event.clientX, event.clientY)
+})
+
+// "More" menu: a popover on desktop, a bottom sheet on narrow screens. '-' in `items` is a divider.
+// The ref's openAt(x, y) opens it at the pointer, for a right-click.
+const ActionMenu = forwardRef(function ActionMenu({ items, label, align = 'right', icon, buttonClassName }, ref) {
   const { t } = useI18n()
   const menuLabel = label || t('common.moreActions')
   const [open, setOpen] = useState(false)
@@ -17,16 +30,30 @@ export default function ActionMenu({ items, label, align = 'right' }) {
   const { closing, close } = useDismiss(() => setOpen(false))
   const { pos, measure } = useAnchoredPosition(open && !mobile)
 
-  const openMenu = () => {
+  const [point, setPoint] = useState(null)
+
+  const openMenu = (at) => {
     menuFocusedRef.current = false
+    setPoint(at || null)
     setMobile(window.matchMedia('(max-width: 639px)').matches)
     setOpen(true)
   }
 
+  const openAt = (x, y) => openMenu({ getBoundingClientRect: () => ({ top: y, bottom: y, left: x, right: x }) })
+  useImperativeHandle(ref, () => ({ openAt }))
+  const openAtRef = useRef(openAt)
+  openAtRef.current = openAt
+  useEffect(() => {
+    const host = btnRef.current?.closest('[data-menu-host]')
+    if (!host) return undefined
+    hostMenus.set(host, (x, y) => openAtRef.current(x, y))
+    return () => hostMenus.delete(host)
+  }, [])
+
   // Menu must exist in the DOM (even off-screen) before its real height is
   // known — measure right after that first paint, not before.
   useLayoutEffect(() => {
-    if (open && !mobile && menuRef.current) measure(btnRef.current, menuRef.current, align)
+    if (open && !mobile && menuRef.current) measure(point || btnRef.current, menuRef.current, point ? 'left' : align)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mobile])
 
@@ -48,8 +75,13 @@ export default function ActionMenu({ items, label, align = 'right' }) {
     }
   }, [open, close])
 
+  const closeRef = useRef(close)
+  closeRef.current = close
+  useEffect(() => (open ? pushBackLayer(() => closeRef.current()) : undefined), [open])
+
   useEffect(() => {
-    if (!open || (!mobile && !pos) || menuFocusedRef.current) return undefined
+    // On the console the cursor picks the item; a focused first row would look like a second pointer.
+    if (!open || (!mobile && !pos) || menuFocusedRef.current || isPS5()) return undefined
     menuFocusedRef.current = true
     const frame = window.requestAnimationFrame(() => {
       menuRef.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus()
@@ -63,7 +95,7 @@ export default function ActionMenu({ items, label, align = 'right' }) {
   }, [open])
 
   const onMenuKeyDown = (event) => {
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    if (isPS5() || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
     const items = Array.from(menuRef.current?.querySelectorAll('[role="menuitem"]:not(:disabled)') || [])
     if (items.length === 0) return
     event.preventDefault()
@@ -88,16 +120,18 @@ export default function ActionMenu({ items, label, align = 'right' }) {
       <button
         ref={btnRef}
         type="button"
-        onClick={openMenu}
+        onClick={() => openMenu()}
         title={menuLabel}
         aria-label={menuLabel}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="pmgr-icon-btn grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-transparent text-text-dim hover:border-panel-border hover:bg-panel-border hover:text-text"
+        className={buttonClassName || 'pmgr-icon-btn grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-transparent text-text-dim hover:border-panel-border hover:bg-panel-border hover:text-text'}
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <circle cx="12" cy="5" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="12" cy="19" r="1.8" />
-        </svg>
+        {icon || (
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="12" cy="5" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="12" cy="19" r="1.8" />
+          </svg>
+        )}
       </button>
 
       {open && createPortal(
@@ -179,4 +213,6 @@ export default function ActionMenu({ items, label, align = 'right' }) {
       )}
     </>
   )
-}
+})
+
+export default ActionMenu

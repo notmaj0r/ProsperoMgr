@@ -304,6 +304,28 @@ bool SetNativePermissions(const std::string &raw_path, uint32_t mode, std::strin
     return true;
 }
 
+bool SetNativePermissionsTree(const std::string &raw_path, uint32_t mode, std::string *err) {
+    fs::path path;
+    if (!NormalizeAbsolute(raw_path, &path, err)) return false;
+    struct stat st {};
+    if (lstat(path.c_str(), &st) != 0) {
+        if (err) *err = std::string("could not inspect path: ") + std::strerror(errno);
+        return false;
+    }
+    // A folder without the execute bit can't be entered, so it keeps it wherever it can be read.
+    bool is_dir = S_ISDIR(st.st_mode);
+    uint32_t own = is_dir ? (mode | ((mode & 0444) >> 2)) : mode;
+    if (!SetNativePermissions(raw_path, own, err)) return false;
+    if (!is_dir) return true;
+    std::error_code ec;
+    for (fs::directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec)) {
+        struct stat child {};
+        if (lstat(it->path().c_str(), &child) != 0 || S_ISLNK(child.st_mode)) continue;
+        if (!SetNativePermissionsTree(it->path().string(), mode, err)) return false;
+    }
+    return true;
+}
+
 bool RemoveNativeTree(const std::string &raw_path, std::string *err) {
     fs::path path;
     if (!NormalizeAbsolute(raw_path, &path, err)) return false;

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,7 @@ bool g_listening = false;
 // Bounded: a real install makes thousands of range requests, and only the first
 // few show whether the installer is talking to us as expected.
 std::atomic<int> g_log_budget{0};
+std::atomic<uint64_t> g_bytes_served{0};
 
 void StreamLog(const std::string &line) {
     if (g_log_budget.fetch_sub(1) <= 0) return;
@@ -60,6 +62,7 @@ bool SendAll(int fd, const char *data, size_t len) {
         ssize_t n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
         if (n <= 0) return false;
         sent += static_cast<size_t>(n);
+        g_bytes_served += static_cast<uint64_t>(n);
     }
     return true;
 }
@@ -109,21 +112,36 @@ const Session *ResolveRequest(const std::string &request, std::string *method) {
     return nullptr;
 }
 
-void ServeConnection(int client) {
-    timeval timeout{30, 0};
-    (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    (void)setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-    int nodelay = 1;
-    (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+std::string g_cover;      // guarded by g_mu
+std::string g_cover_name; // the installer fetches it next to the package, under /stream/install/
 
-    std::string request;
-    char buffer[2048];
-    while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384) {
-        ssize_t got = recv(client, buffer, sizeof(buffer), 0);
-        if (got <= 0) break;
-        request.append(buffer, static_cast<size_t>(got));
+bool IsCoverRequest(const std::string &request, const std::string &name) {
+    size_t sp = request.find(' ');
+    if (name.empty() || sp == std::string::npos ||
+        (request.compare(0, sp, "GET") != 0 && request.compare(0, sp, "HEAD") != 0)) {
+        return false;
     }
+    size_t end = request.find_first_of(" ?", sp + 1);
+    return end != std::string::npos && request.compare(sp + 1, end - sp - 1, "/stream/install/" + name) == 0;
+}
 
+// Answers one request on a connection that closes afterwards.
+void ServeRequest(int client, const std::string &request) {
+        std::string cover, cover_name;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        cover = g_cover;
+        cover_name = g_cover_name;
+    }
+    if (IsCoverRequest(request, cover_name)) {
+        LogEvent("[pkgstream] cover art requested by the console (" + std::to_string(cover.size()) + " bytes)");
+        std::string head = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: " + std::to_string(cover.size()) +
+                           "\r\nConnection: close\r\n\r\n";
+        if (SendAll(client, head.data(), head.size()) && request.compare(0, 4, "HEAD") != 0) {
+            (void)SendAll(client, cover.data(), cover.size());
+        }
+        return;
+    }
     std::string first_line = request.substr(0, request.find('\r'));
     std::string path, url, live_id, method;
     long long total = 0;
@@ -133,7 +151,6 @@ void ServeConnection(int client) {
         if (!session) {
             StreamLog("404 for: " + (first_line.empty() ? std::string("<no request line>") : first_line));
             (void)SendAll(client, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 66);
-            close(client);
             return;
         }
         path = session->path;
@@ -168,19 +185,13 @@ void ServeConnection(int client) {
                                    "Connection: close\r\n\r\n",
                                    total);
     }
-    if (header_len <= 0 || !SendAll(client, header, static_cast<size_t>(header_len)) || method == "HEAD") {
-        close(client);
-        return;
-    }
+    if (header_len <= 0 || !SendAll(client, header, static_cast<size_t>(header_len)) || method == "HEAD") return;
 
     std::string chunk(kChunk, '\0');
     long long at = start;
 
     if (!live_id.empty()) {
-        if (!PkgLiveCache::CheckId(live_id) || PkgLiveCache::Attach() != 0) {
-            close(client);
-            return;
-        }
+        if (!PkgLiveCache::CheckId(live_id) || PkgLiveCache::Attach() != 0) return;
         while (at <= end) {
             size_t want = static_cast<size_t>(std::min<long long>(static_cast<long long>(kChunk), end - at + 1));
             long got = PkgLiveCache::Read(static_cast<uint64_t>(at), chunk.data(), want);
@@ -188,7 +199,6 @@ void ServeConnection(int client) {
             at += got;
         }
         PkgLiveCache::Detach();
-        close(client);
         return;
     }
 
@@ -208,15 +218,11 @@ void ServeConnection(int client) {
             if (!SendAll(client, chunk.data(), got)) break;
             at += static_cast<long long>(got);
         }
-        close(client);
         return;
     }
 
     int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        close(client);
-        return;
-    }
+    if (fd < 0) return;
     while (at <= end) {
         size_t want = static_cast<size_t>(std::min<long long>(static_cast<long long>(kChunk), end - at + 1));
         ssize_t got;
@@ -225,6 +231,25 @@ void ServeConnection(int client) {
         at += got;
     }
     close(fd);
+}
+
+void ServeConnection(int client) {
+    timeval timeout{30, 0};
+    (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    int nodelay = 1;
+    (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    int sndbuf = 1024 * 1024;
+    (void)setsockopt(client, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+    std::string request;
+    char buffer[2048];
+    while (request.find("\r\n\r\n") == std::string::npos && request.size() < 16384) {
+        ssize_t got = recv(client, buffer, sizeof(buffer), 0);
+        if (got <= 0) break;
+        request.append(buffer, static_cast<size_t>(got));
+    }
+    ServeRequest(client, request);
     close(client);
 }
 
@@ -248,7 +273,8 @@ void ListenLoop() {
     for (;;) {
         int client = accept(server, nullptr, nullptr);
         if (client < 0) continue;
-        ServeConnection(client);
+        // The installer reads several ranges at once; a connection waiting on data must not hold up the rest.
+        StartBackgroundThread([client]() { ServeConnection(client); });
     }
 }
 
@@ -338,6 +364,19 @@ bool StartLivePkgStream(const std::string &session_id, std::string *uri, std::st
     return true;
 }
 
+std::string SetPkgCover(const std::string &png) {
+    static unsigned counter = 0;
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (png.size() < 8 || png.size() > 10 * 1024 * 1024 || png.compare(0, 8, "\x89PNG\r\n\x1a\n") != 0) {
+        g_cover.clear();
+        g_cover_name.clear();
+        return "";
+    }
+    g_cover = png;
+    g_cover_name = "icon-" + std::to_string(static_cast<long long>(time(nullptr))) + "-" + std::to_string(++counter) + ".png";
+    return "http://127.0.0.1:" + std::to_string(kStreamPort) + "/stream/install/" + g_cover_name;
+}
+
 void StopPkgStream(const std::string &uri) {
     std::lock_guard<std::mutex> lock(g_mu);
     for (auto it = g_sessions.begin(); it != g_sessions.end(); ++it) {
@@ -347,5 +386,7 @@ void StopPkgStream(const std::string &uri) {
         }
     }
 }
+
+uint64_t PkgStreamBytesServed() { return g_bytes_served.load(); }
 
 } // namespace prospero

@@ -10,7 +10,7 @@ const TOAST_MS = 6000
 // from state only after its exit animation has actually finished playing.
 const TOAST_EXIT_MS = 120
 
-// showToast(message, tone) — tone is 'ok' | 'err' | 'warn', defaults to 'ok'.
+// showToast(message, tone, { action: { label, onClick }, duration }); tone is 'ok', 'err' or 'warn'.
 export function useToast() {
   return useContext(ToastContext)
 }
@@ -60,10 +60,11 @@ export function ToastProvider({ children }) {
     }, TOAST_EXIT_MS)
   }, [])
 
-  const showToast = useCallback((message, tone = 'ok') => {
+  const showToast = useCallback((message, tone = 'ok', options = {}) => {
     const id = ++idRef.current
-    setToasts((t) => [...t, { id, message, tone, closing: false }])
-    setTimeout(() => dismiss(id), TOAST_MS)
+    const duration = options.duration || TOAST_MS
+    setToasts((t) => [...t, { id, message, tone, closing: false, action: options.action, duration }])
+    setTimeout(() => dismiss(id), duration)
 
     // Only failures/warnings are worth surfacing again later in the bell.
     if (tone === 'err' || tone === 'warn') {
@@ -96,15 +97,27 @@ export function ToastProvider({ children }) {
                 <div className="flex items-start gap-2">
                   <span className={`mt-0.5 shrink-0 ${TONE_ICON_CLASS[toast.tone] || TONE_ICON_CLASS.ok}`}><Icon size={16} /></span>
                   <span className="whitespace-pre-wrap break-words leading-relaxed">{toast.message}</span>
+                  {toast.action && (
+                    <button
+                      type="button"
+                      onClick={() => { toast.action.onClick(); dismiss(toast.id) }}
+                      className="pmgr-icon-btn ml-2 shrink-0 rounded-md border border-current px-2 py-0.5 text-xs font-bold hover:bg-panel-border"
+                    >
+                      {toast.action.label}
+                    </button>
+                  )}
                 </div>
                 <button
                   onClick={() => dismiss(toast.id)}
                   aria-label={t('common.close')}
-                  className="pmgr-icon-btn absolute right-2 top-2 text-current opacity-50 hover:opacity-100"
+                  className="pmgr-icon-btn !absolute right-2 top-2 text-current opacity-50 hover:opacity-100"
                 >
                   <CloseIcon size={13} />
                 </button>
-                <div className={`pmgr-toast-bar absolute bottom-0 left-0 right-0 h-0.5 origin-left ${TONE_BAR[toast.tone] || TONE_BAR.ok}`} />
+                <div
+                  className={`pmgr-toast-bar absolute bottom-0 left-0 right-0 h-0.5 origin-left ${TONE_BAR[toast.tone] || TONE_BAR.ok}`}
+                  style={{ animationDuration: `${toast.duration}ms` }}
+                />
               </div>
             )
           })}

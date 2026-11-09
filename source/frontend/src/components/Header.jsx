@@ -1,6 +1,8 @@
 import Pill from './Pill.jsx'
 import NotificationsBell from './NotificationsBell.jsx'
 import LanguagePicker from './LanguagePicker.jsx'
+import PowerMenu from './PowerMenu.jsx'
+import UpdateBadge from './UpdateBadge.jsx'
 import { useI18n } from '../lib/i18n.jsx'
 
 const LINKS = {
@@ -102,7 +104,8 @@ export default function Header({ title, status, connection, onRetry, onOpenHelp,
           <span className="hidden sm:inline">{CONNECTION_LABELS[connection] || t('header.connecting')}</span>
         </button>
       )}
-      {status && <Pill tone="neutral">v{status.version}</Pill>}
+      {status && <span className="hidden sm:inline-flex"><Pill tone="neutral">v{status.version}</Pill></span>}
+      <UpdateBadge />
       <button
         onClick={onOpenCommand}
         title={t('header.command')}
@@ -124,6 +127,7 @@ export default function Header({ title, status, connection, onRetry, onOpenHelp,
       >
         ?
       </button>
+      <PowerMenu />
     </>
   )
 
@@ -136,21 +140,12 @@ export default function Header({ title, status, connection, onRetry, onOpenHelp,
           </div>
           <h1 className="truncate text-lg font-bold tracking-tight text-text">{title}</h1>
         </div>
-        {/* On phones, the utility cluster (language/notifications/help/…)
-            rides the title row so the social strip below it doesn't have
-            to share space with anything else. */}
+        {/* On phones the utility cluster sits on the title row, above the social strip. */}
         <div className="flex shrink-0 items-center gap-1.5 sm:hidden">{utilityCluster}</div>
       </div>
 
-      {/* The social pills' glow/hover-lift/focus-ring all paint outside
-          their own box, and any overflow-x here (needed so the strip can
-          scroll on a cramped width) forces the browser to clip that
-          overflow-y too — that's what was squaring their edges off. Real
-          vertical padding on the scrollport, not `overflow-y: visible`
-          (browsers still clip that once overflow-x is non-visible), gives
-          the glow/lift/ring somewhere to actually paint. `lg:overflow-visible`
-          drops the scrollport (and the padding's layout cost) once the
-          header is wide enough that it was never going to scroll anyway. */}
+      {/* The pills' glow paints outside their box, and overflow-x clips it. The vertical padding
+          gives it room; lg drops the scrollport since the strip never scrolls there. */}
       <div className="-my-2.5 flex min-w-0 items-center gap-1.5 overflow-x-auto overflow-y-visible py-2.5 sm:gap-2 lg:overflow-visible">
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <SocialRow onOpenSupport={onOpenSupport} t={t} />

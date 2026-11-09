@@ -4,6 +4,7 @@ import { useNotifications } from '../lib/ToastContext.jsx'
 import { timeAgo } from '../lib/time.js'
 import { useI18n } from '../lib/i18n.jsx'
 import { useAnchoredPosition } from '../lib/useAnchoredPosition.js'
+import { useBackLayer } from '../lib/backLayer.js'
 
 export default function NotificationsBell() {
   const { t, locale } = useI18n()
@@ -13,6 +14,7 @@ export default function NotificationsBell() {
   ]
   const { notifications, unreadCount, markAllRead, clearAll } = useNotifications()
   const [open, setOpen] = useState(false)
+  useBackLayer(open, () => setOpen(false))
   const [tab, setTab] = useState('all')
   const ref = useRef(null)
   const btnRef = useRef(null)

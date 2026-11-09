@@ -3,6 +3,7 @@
 // AppInstUtil API. On failure, surfaces the real PS5 error code, not a generic one.
 
 #include <functional>
+#include <cstdint>
 #include <string>
 
 #include "config.hpp"
@@ -27,11 +28,24 @@ struct PkgMetadata {
     std::string title_name;
     std::string version;
     std::string category; // "base", "update" or "dlc"; empty when undetermined
+    long long icon_offset = 0; // icon0.png inside the file; 0 when the package has none
+    uint32_t icon_size = 0;
 };
 
 // Walks the package's own entry table for param.sfo/param.json, so the UI can name
 // a package instead of showing its filename. Read-only; never touches the installer.
 PkgMetadata ReadPkgMetadata(const std::string &path);
+
+struct InstalledTitle {
+    bool installed = false; // the base game is on the console
+    std::string version;    // highest base or patch version found, may be empty
+};
+
+// Looks for the game in the console's app folders, so the UI can warn before an upload.
+InstalledTitle FindInstalledTitle(const std::string &title_id);
+
+// Holds the cover art the browser read from a package until its live upload starts installing.
+void StagePkgCover(const std::string &png);
 
 // path must already be a local file (e.g. downloaded via PkgDownloadToTemp).
 PkgInstallResult InstallPkgFile(const Config &cfg, const std::string &path);
@@ -86,5 +100,16 @@ bool StartPkgInstallJobFromLiveSession(const Config &cfg, const std::string &ses
 // Aborts an in-progress or already-queued live-session install. Safe to call with none
 // active. The session's own monitor thread does the actual teardown once it notices.
 void CancelLivePkgInstall();
+
+// Stops a running download (or one waiting to validate) and tears down any live session.
+// Once the console has accepted the package the install is out of our hands.
+void CancelPkgInstall();
+
+// True while a download/install job or live session is still ours to finish.
+bool PkgInstallBusy();
+
+// Removes an installed game through the console's own installer. The removal itself finishes in the
+// background; this only reports whether the console accepted the request.
+bool UninstallTitle(const Config &cfg, const std::string &title_id, std::string *err);
 
 } // namespace prospero

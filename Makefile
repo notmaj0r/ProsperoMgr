@@ -75,7 +75,7 @@ CXXFLAGS_PS5 := -std=c++20 -O2 -Wall -Wframe-larger-than=16384 -I$(INC_DIR) -I$(
 LDFLAGS_PS5 := $(PS5_PAYLOAD_SDK)/target/lib/libmbedcrypto.a $(PS5_PAYLOAD_SDK)/target/lib/libmicrohttpd.a \
                 -L$(PS5_PAYLOAD_SDK)/target/lib -lpthread -lkernel_sys \
                 -lSceSystemService -lSceUserService -lSceRegMgr -lSceAppInstUtil \
-                -lSceNetCtl -lSceHttp -lSceHttp2 -lSceSsl -lSceNet -lSceNotification
+                -lSceNetCtl -lSceHttp -lSceHttp2 -lSceSsl -lSceNet -lSceNotification -lSceIpmi
 
 # Trimmed amalgamation build — read-only usage, no extension/window-function
 # support needed (and this amalgamation doesn't compile with windowfunc half-on).
@@ -119,7 +119,7 @@ pkg-helper: check-ps5-sdk $(PKG_HELPER_ELF)
 
 $(PKG_HELPER_ELF): $(PKG_HELPER_SRC) $(PKG_HELPER_POLICY) Makefile
 	$(CC) -Os -Wall -Werror -I$(INC_DIR) -o $@ $< \
-		-lSceSystemService -lSceUserService -lSceAppInstUtil \
+		-lSceSystemService -lSceUserService -lSceAppInstUtil -lSceNetCtl \
 		-lSceNotification -lkernel_sys -lpthread -lSceNet
 	$(STRIP) --strip-all $@
 

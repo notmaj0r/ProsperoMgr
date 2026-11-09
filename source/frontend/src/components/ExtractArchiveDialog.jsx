@@ -25,6 +25,7 @@ const CONFLICT_POLICIES = ['skip', 'replace', 'keep_both']
 export default function ExtractArchiveDialog({ entries, sourceDir, volumes, onClose, onExtracted }) {
   const { t, locale } = useI18n()
   const single = entries.length === 1
+  const hasRar = entries.some((entry) => entry.name.toLowerCase().endsWith('.rar'))
   const [destMode, setDestMode] = useState('sibling') // sibling|current|choose
   const [chosenFolder, setChosenFolder] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -99,7 +100,7 @@ export default function ExtractArchiveDialog({ entries, sourceDir, volumes, onCl
     try {
       const jobIds = []
       for (const entry of entries) {
-        const result = await api.ftp.unzip(archivePathOf(entry), destinationFor(entry), conflictPolicy, deleteSource, single ? password : undefined)
+        const result = await api.ftp.unzip(archivePathOf(entry), destinationFor(entry), conflictPolicy, deleteSource, password || undefined)
         jobIds.push(result.job_id)
       }
       onExtracted(jobIds)
@@ -162,12 +163,28 @@ export default function ExtractArchiveDialog({ entries, sourceDir, volumes, onCl
                 {passwordError && <div className="text-xs text-err">{passwordError}</div>}
               </div>
             )}
+            {!single && hasRar && (
+              <div className="mb-4 space-y-1.5 rounded-lg border border-panel-border bg-bg/45 px-3 py-3">
+                <div className="flex items-center gap-2 text-xs font-semibold text-text-dim">
+                  <LockIcon size={14} /> {t('archive.batchPassword')}
+                </div>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={t('archive.passwordPlaceholder')}
+                  dir="ltr"
+                  className="w-full rounded-lg border border-panel-border bg-bg px-3 py-2 text-sm text-text outline-none focus:border-accent"
+                />
+                <div className="text-xs text-text-dim">{t('archive.batchPasswordHint')}</div>
+              </div>
+            )}
             {single && !passwordNeeded && (
               <div className="mb-4 space-y-1 rounded-lg border border-panel-border bg-bg/45 px-3 py-2.5 text-xs">
                 {infoError ? (
                   <div className="text-err">{infoError}</div>
                 ) : !info ? (
-                  <div className="text-text-dim">{t('common.loading')}</div>
+                  <div className="pmgr-skeleton h-4 w-2/3 rounded" />
                 ) : (
                   <>
                     <div className="flex items-center justify-between text-text-dim">

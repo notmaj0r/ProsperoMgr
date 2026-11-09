@@ -9,6 +9,7 @@
 
 #include "avatar.hpp"
 #include "notify.hpp"
+#include "notify_text.hpp"
 #include "ps5_services.hpp"
 
 namespace prospero {
@@ -35,6 +36,31 @@ std::string HexId(uint64_t id) {
     return buf;
 }
 
+// What the user sees and types: the 8 bytes in memory order, as Garlic SaveMgr and a hex editor
+// show them. The registry and the saves hold those same bytes, so the two always match.
+std::string ByteOrderHex(uint64_t id) {
+    char buf[24] = "0x";
+    const unsigned char *bytes = reinterpret_cast<const unsigned char *>(&id);
+    for (int i = 0; i < 8; i++) std::snprintf(buf + 2 + i * 2, 3, "%02x", bytes[i]);
+    return buf;
+}
+
+bool ParseByteOrderHex(const std::string &text, uint64_t *out) {
+    size_t start = text.rfind("0x", 0) == 0 || text.rfind("0X", 0) == 0 ? 2 : 0;
+    if (text.size() - start != 16) return false;
+    unsigned char bytes[8];
+    for (int i = 0; i < 8; i++) {
+        char pair[3] = {text[start + i * 2], text[start + i * 2 + 1], 0};
+        char *end = nullptr;
+        unsigned long value = std::strtoul(pair, &end, 16);
+        if (!end || *end != '\0') return false;
+        bytes[i] = static_cast<unsigned char>(value);
+    }
+    std::memcpy(out, bytes, sizeof(bytes));
+    return true;
+}
+
+// The numeric form older account backups were written in; kept so they still restore.
 bool ParseHexId(const std::string &text, uint64_t *out) {
     if (text.empty()) return false;
     char *end = nullptr;
@@ -54,7 +80,7 @@ AccountSlot ReadSlot(int slot, int foreground_slot) {
 
     uint64_t id = 0;
     sceRegMgrGetBin(IdEntity(slot), &id, sizeof(id));
-    s.id_hex = HexId(id);
+    s.id_hex = ByteOrderHex(id);
 
     char type[17] = {0};
     sceRegMgrGetStr(TypeEntity(slot), type, sizeof(type));
@@ -242,7 +268,9 @@ bool BackupAccountSlot(const Config &cfg, int slot, std::string *err) {
         if (err) *err = "could not write account backup";
         return false;
     }
-    out << current.name << '\n' << current.id_hex << '\n' << current.type << '\n' << current.flags << '\n';
+    uint64_t raw_id = 0;
+    sceRegMgrGetBin(IdEntity(slot), &raw_id, sizeof(raw_id));
+    out << current.name << '\n' << HexId(raw_id) << '\n' << current.type << '\n' << current.flags << '\n';
 
     for (const auto &f : kStrFields) {
         char base_val[65] = {0}, slot_val[65] = {0};
@@ -265,8 +293,8 @@ bool ApplyOfflineActivation(const Config &cfg, int slot, const std::string &acco
         return false;
     }
     uint64_t id = 0;
-    if (!ParseHexId(account_id_hex, &id) || id == 0) {
-        if (err) *err = "account_id must be a non-zero hex value";
+    if (!ParseByteOrderHex(account_id_hex, &id) || id == 0) {
+        if (err) *err = "account_id must be 16 hex digits and not all zero";
         return false;
     }
     AccountSlot current = ReadSlot(slot, 0);
@@ -304,8 +332,8 @@ bool ApplySignIn(const Config &cfg, const std::string &account_id_hex, std::stri
     }
 
     uint64_t id = 0;
-    if (!ParseHexId(account_id_hex, &id) || id == 0) {
-        if (err) *err = "account_id must be a non-zero hex value";
+    if (!ParseByteOrderHex(account_id_hex, &id) || id == 0) {
+        if (err) *err = "account_id must be 16 hex digits and not all zero";
         return false;
     }
 
@@ -334,7 +362,7 @@ bool ApplySignIn(const Config &cfg, const std::string &account_id_hex, std::stri
     WriteRegistryState(cfgbuf, 0);
     if (slot > 1) WriteRegistryState(cfgbuf, slot_off);
 
-    NotifyDebug("\xF0\x9F\x91\x8D Signed in! Reboot to apply.");
+    NotifyDebug("\xF0\x9F\x91\x8D " + NotifyText(Msg::kSignedIn));
     return true;
 }
 

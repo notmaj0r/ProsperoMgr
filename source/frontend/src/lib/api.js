@@ -1,7 +1,7 @@
 // Thin fetch wrapper for the /api/* routes in backend/src/api_routes.cpp.
 // Plain functions, no client-state library — views manage their own loading/error state.
 
-import { directUploadPkg } from './pkgDirectUpload.js'
+import { cancelDirectUpload, directUploadPkg } from './pkgDirectUpload.js'
 
 // fetch() throws a bare TypeError when the connection itself drops, not when the server
 // answers with an HTTP error — name it plainly instead of the browser's opaque "Failed to fetch".
@@ -131,18 +131,21 @@ function uploadWithProgress(path, file, onProgress, options = {}) {
   })
 }
 
+const CHUNK_STALL_MS = 30000
+
 // Chunk size scales with file size — big enough for TCP to reach steady state on a large
 // transfer, capped under the backend's 264 MiB limit and matched to its 256 MiB fsync checkpoint.
 function chunkSizeFor(fileSize) {
   const MiB = 1024 * 1024
   if (fileSize >= 4 * 1024 * MiB) return 256 * MiB
   if (fileSize >= 512 * MiB) return 128 * MiB
-  return 64 * MiB
+  if (fileSize >= 128 * MiB) return 64 * MiB
+  return 16 * MiB
 }
 
 // A game-sized upload shouldn't depend on one hours-long connection — each
 // chunk commits to its checkpoint independently and retries are idempotent.
-function uploadResumable(path, file, onProgress, onRetry, overwrite = false) {
+function uploadResumable(path, file, onProgress, onRetry, overwrite = false, signal) {
   const overwriteQuery = overwrite ? '&overwrite=1' : ''
   if (file.size === 0) return uploadRaw(`/api/ftp/upload?path=${encodeURIComponent(path)}${overwriteQuery}`, file)
 
@@ -154,18 +157,51 @@ function uploadResumable(path, file, onProgress, onRetry, overwrite = false) {
   const reportProgress = throttleProgress(onProgress)
 
   return new Promise((resolve, reject) => {
+    let activeXhr = null
+    // Frees the console's reservation and partial file whenever the upload ends early.
+    const abandon = (error) => {
+      activeXhr?.abort()
+      request('POST', '/api/ftp/upload/cancel', { path, upload_id: uploadId }).catch(() => {})
+      reject(error)
+    }
+    signal?.addEventListener('abort', () => abandon(new Error('canceled')), { once: true })
     const sendChunk = () => {
       const end = Math.min(file.size, offset + chunkSize)
       const chunk = file.slice(offset, end)
       let attempt = 0
 
       const run = () => {
+        if (signal?.aborted) return
         const xhr = new XMLHttpRequest()
+        activeXhr = xhr
         const query = `path=${encodeURIComponent(path)}&upload_id=${encodeURIComponent(uploadId)}&offset=${offset}&total=${file.size}${overwriteQuery}`
         xhr.open('POST', `/api/ftp/upload/chunk?${query}`)
         xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-        xhr.upload.onprogress = (event) => reportProgress(offset + event.loaded, file.size)
+        let stallTimer = 0
+        const retryChunk = () => {
+          window.clearTimeout(stallTimer)
+          if (attempt < 3) {
+            attempt++
+            onRetry?.(attempt)
+            window.setTimeout(run, 400 * attempt)
+          } else {
+            abandon(new Error(NETWORK_ERROR_HINT))
+          }
+        }
+        // A stalled connection raises no error event, so retry the chunk after a quiet spell.
+        const armStall = () => {
+          window.clearTimeout(stallTimer)
+          stallTimer = window.setTimeout(() => {
+            xhr.abort()
+            retryChunk()
+          }, CHUNK_STALL_MS)
+        }
+        xhr.upload.onprogress = (event) => {
+          armStall()
+          reportProgress(offset + event.loaded, file.size)
+        }
         xhr.onload = () => {
+          window.clearTimeout(stallTimer)
           let data = {}
           try {
             data = JSON.parse(xhr.responseText)
@@ -173,12 +209,12 @@ function uploadResumable(path, file, onProgress, onRetry, overwrite = false) {
             /* handled by status below */
           }
           if (xhr.status < 200 || xhr.status >= 300) {
-            reject(new Error(data.error || `upload failed (${xhr.status})`))
+            abandon(new Error(data.error || `upload failed (${xhr.status})`))
             return
           }
           const next = Number(data.next_offset)
           if (!Number.isFinite(next) || next <= offset || next > file.size) {
-            reject(new Error('server returned an invalid upload checkpoint'))
+            abandon(new Error('server returned an invalid upload checkpoint'))
             return
           }
           offset = next
@@ -186,17 +222,9 @@ function uploadResumable(path, file, onProgress, onRetry, overwrite = false) {
           if (data.complete || offset === file.size) resolve(data)
           else sendChunk()
         }
-        const retryChunk = () => {
-          if (attempt < 3) {
-            attempt++
-            onRetry?.(attempt)
-            window.setTimeout(run, 400 * attempt)
-          } else {
-            reject(new Error(NETWORK_ERROR_HINT))
-          }
-        }
         xhr.onerror = retryChunk
         xhr.ontimeout = retryChunk
+        armStall()
         xhr.send(chunk)
       }
       run()
@@ -222,8 +250,8 @@ export const api = {
     setFavorite: (name, favorite) => request('POST', '/api/payloads/favorite', { name, favorite }),
     rename: (name, newName) => request('POST', '/api/payloads/rename', { name, new_name: newName }),
     importPath: (path) => request('POST', '/api/payloads/import-path', { path }),
-    upload: (file, onProgress, onRetry) =>
-      uploadWithProgress(`/api/payloads/upload?name=${encodeURIComponent(file.name)}`, file, onProgress || (() => {}), {
+    upload: (file, onProgress, onRetry, name = file.name) =>
+      uploadWithProgress(`/api/payloads/upload?name=${encodeURIComponent(name)}`, file, onProgress || (() => {}), {
         retries: 1,
         onRetry,
       }),
@@ -268,6 +296,7 @@ export const api = {
   ftp: {
     status: () => request('GET', '/api/ftp/status'),
     storage: () => request('GET', '/api/ftp/storage'),
+    ejectUsb: (path) => request('POST', '/api/storage/eject', { path }),
     // `isDir` for a directory destination (e.g. an extraction target) —
     // checks free space on that directory itself rather than its parent.
     preflight: (path, size, isDir) =>
@@ -277,18 +306,21 @@ export const api = {
     conflicts: (paths) => request('POST', '/api/ftp/conflicts', { paths }),
     uniqueNames: (paths) => request('POST', '/api/ftp/unique-names', { paths }),
     mkdir: (path) => request('POST', '/api/ftp/mkdir', { path }),
+    mkdirs: (paths) => request('POST', '/api/ftp/mkdirs', { paths }),
+    sync: () => request('POST', '/api/ftp/sync'),
     delete: (path, type) => request('POST', '/api/ftp/delete', { path, type }),
     rename: (from, to) => request('POST', '/api/ftp/rename', { from, to }),
-    chmod: (path, mode) => request('POST', '/api/ftp/chmod', { path, mode }),
+    chmod: (path, mode, recursive = false) => request('POST', '/api/ftp/chmod', { path, mode, recursive }),
     copy: (source, destination, conflictPolicy = 'cancel') =>
       request('POST', '/api/ftp/copy', { source, destination, conflict_policy: conflictPolicy }),
     move: (source, destination, conflictPolicy = 'cancel') =>
       request('POST', '/api/ftp/move', { source, destination, conflict_policy: conflictPolicy }),
     downloadUrl: (path) => `/api/ftp/download?path=${encodeURIComponent(path)}`,
+    downloadDecryptedUrl: (path) => `/api/ftp/download-decrypted?path=${encodeURIComponent(path)}`,
     upload: (path, file, overwrite = false) =>
       uploadRaw(`/api/ftp/upload?path=${encodeURIComponent(path)}${overwrite ? '&overwrite=1' : ''}`, file),
-    uploadWithProgress: (path, file, onProgress, onRetry, overwrite = false) =>
-      uploadResumable(path, file, onProgress, onRetry, overwrite),
+    uploadWithProgress: (path, file, onProgress, onRetry, overwrite = false, signal) =>
+      uploadResumable(path, file, onProgress, onRetry, overwrite, signal),
     // Text reads include the version and original line-ending format.
     readText: async (path) => {
       let res
@@ -322,7 +354,9 @@ export const api = {
       request('POST', '/api/ftp/unzip', { path, destination, conflict_policy: conflictPolicy, delete_source: deleteSource, password }),
     jobs: () => request('GET', '/api/files/jobs'),
     cancelJob: (id) => request('POST', '/api/files/jobs/cancel', { id }),
-    clearJobs: () => request('POST', '/api/files/jobs/clear'),
+    clearJobs: (onlyDone = false) => request('POST', '/api/files/jobs/clear', onlyDone ? { only_done: true } : undefined),
+    pauseJobs: (paused) => request('POST', '/api/files/jobs/pause', { paused }),
+    moveJob: (id, direction) => request('POST', '/api/files/jobs/move', { id, direction }),
   },
 
   elfldr: {
@@ -332,8 +366,24 @@ export const api = {
   titles: {
     list: () => request('GET', '/api/titles'),
     running: () => request('GET', '/api/titles/running'),
+    size: (titleId) => request('GET', `/api/titles/size?id=${encodeURIComponent(titleId)}`),
     iconUrl: (titleId) => `/api/titles/icon?id=${encodeURIComponent(titleId)}`,
     launch: (titleId) => request('POST', '/api/titles/launch', { title_id: titleId }),
+    close: () => request('POST', '/api/titles/close'),
+    uninstall: (titleId) => request('POST', '/api/titles/uninstall', { title_id: titleId }),
+  },
+
+  media: {
+    list: () => request('GET', '/api/media/list'),
+    fileUrl: (path, download = false) => `/api/media/file?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`,
+    thumbUrl: (path) => `/api/media/thumb?path=${encodeURIComponent(path)}`,
+    remove: (paths) => request('POST', '/api/media/delete', { paths }),
+    cleanup: () => request('POST', '/api/media/cleanup'),
+  },
+
+  games: {
+    identify: (paths) => request('POST', '/api/games/identify', { paths }),
+    iconUrl: (game) => (game.own_icon ? `/api/games/folder-icon?path=${encodeURIComponent(game.path)}` : api.titles.iconUrl(game.title_id)),
   },
 
   avatar: {
@@ -359,16 +409,16 @@ export const api = {
         throw new Error(isNetworkLayerError(e) ? NETWORK_ERROR_HINT : e.message)
       }),
     getBackupConfig: () => request('GET', '/api/saves/backup-config'),
-    setBackupConfig: (enabled, settleSeconds, backupRoot) =>
-      request('POST', '/api/saves/backup-config', { enabled, settle_seconds: settleSeconds, backup_root: backupRoot }),
+    setBackupConfig: (enabled, settleSeconds, destinations) =>
+      request('POST', '/api/saves/backup-config', { enabled, settle_seconds: settleSeconds, destinations }),
     listBackups: () => request('GET', '/api/saves/backups'),
     backupNow: (titleId) => request('POST', '/api/saves/backup-now', { title_id: titleId }),
     backupAll: () => request('POST', '/api/saves/backup-all'),
     backupAllStatus: () => request('GET', '/api/saves/backup-all/status'),
     backupDownloadUrl: (path) => `/api/saves/backups/download?path=${encodeURIComponent(path)}`,
     importZip: (file, name) => uploadRaw(`/api/saves/import?name=${encodeURIComponent(name || file.name)}`, file),
-    deleteSaves: (userIdHex, titleId) =>
-      request('POST', '/api/saves/delete', { user_id_hex: userIdHex, title_id: titleId }),
+    deleteSaves: (userIdHex, titleId, backupFirst = false) =>
+      request('POST', '/api/saves/delete', { user_id_hex: userIdHex, title_id: titleId, backup: backupFirst ? 'true' : 'false' }),
     restoreBackup: (path, snapshotFirst = true) =>
       request('POST', '/api/saves/backups/restore', { path, snapshot_first: snapshotFirst ? 'true' : 'false' }),
     deleteBackup: (path) => request('POST', '/api/saves/backups/delete', { path }),
@@ -379,11 +429,36 @@ export const api = {
     install: (opts) => request('POST', '/api/pkg/install', opts),
     // Streams straight into RAM on the console (pkgDirectUpload.js) — nothing is staged
     // on PS5 storage.
-    upload: (file, onProgress) => directUploadPkg(file, onProgress),
+    upload: (file, onProgress, title) => directUploadPkg(file, throttleProgress(onProgress), title),
     status: () => request('GET', '/api/pkg/status'),
+    info: (path) => request('GET', `/api/pkg/info?path=${encodeURIComponent(path)}`),
+    // Hands the cover art the browser read to the console, so its install card can show it.
+    // No image clears the previous one.
+    cover: (blobUrl, note = '') => (blobUrl ? fetch(blobUrl).then((r) => r.blob()) : Promise.resolve(''))
+      .then((blob) => fetch(`/api/pkg/cover?note=${encodeURIComponent(note)}`, { method: 'POST', body: blob }))
+      .catch(() => {}),
+    iconUrl: (path) => `/api/pkg/icon?path=${encodeURIComponent(path)}`,
+    installed: (titleId) => request('GET', `/api/pkg/installed?title_id=${encodeURIComponent(titleId)}`),
     deleteDownload: () => request('POST', '/api/pkg/delete-download'),
+    cancel: () => {
+      cancelDirectUpload()
+      return request('POST', '/api/pkg/cancel')
+    },
   },
 
+  update: {
+    status: () => request('GET', '/api/update'),
+    check: () => request('POST', '/api/update/check'),
+    apply: () => request('POST', '/api/update/apply'),
+    setAuto: (enabled) => request('POST', '/api/update/auto', { enabled }),
+  },
+
+  power: {
+    run: (action) => request('POST', '/api/power', { action }),
+    schedule: () => request('GET', '/api/power/schedule'),
+    setSchedule: (opts) => request('POST', '/api/power/schedule', opts),
+    cancelSchedule: () => request('POST', '/api/power/schedule/cancel'),
+  },
   logs: {
     list: () => request('GET', '/api/logs'),
     clear: () => request('POST', '/api/logs/clear'),
@@ -394,8 +469,10 @@ export const api = {
     clear: () => request('POST', '/api/klogs/clear'),
   },
 
+  hardware: () => request('GET', '/api/hwinfo'),
   thermal: {
     status: () => request('GET', '/api/thermal'),
+    history: () => request('GET', '/api/thermal/history'),
     setFan: (tempC) => request('POST', '/api/thermal/fan', { temp_c: tempC }),
     resetFan: () => request('POST', '/api/thermal/fan/reset'),
   },

@@ -10,6 +10,7 @@ import { useDismiss } from '../lib/useDismiss.js'
 import { useDialogAccessibility } from '../lib/useDialogAccessibility.js'
 import { volumeLabel } from '../lib/format.js'
 import { useI18n } from '../lib/i18n.jsx'
+import { SkeletonRows } from './Skeleton.jsx'
 
 function joinPath(dir, name) {
   return dir.endsWith('/') ? dir + name : `${dir}/${name}`
@@ -151,7 +152,7 @@ export default function PathPickerModal({
           {error && <div className="mb-2 rounded-lg border border-err/25 bg-err/10 px-3 py-2 text-xs text-err">{error}</div>}
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-xl border border-panel-border bg-bg/35 p-1.5">
             {loading ? (
-              <div className="grid h-40 place-items-center text-sm text-text-dim">{t('common.loading')}</div>
+              <SkeletonRows count={5} />
             ) : entries.length === 0 ? (
               <div className="grid h-40 place-items-center text-center text-sm text-text-dim"><span><FolderIcon size={28} /><span className="mt-2 block">{t('files.emptyFolderTitle')}</span></span></div>
             ) : entries.map((entry, index) => {

@@ -5,6 +5,7 @@ import { CheckCircleIcon } from './icons.jsx'
 import { api } from '../lib/api.js'
 import { useI18n } from '../lib/i18n.jsx'
 import { formatFileSize } from '../lib/format.js'
+import { SkeletonRows } from './Skeleton.jsx'
 
 // Lets the user pick a specific release instead of always grabbing latest —
 // same idea as picking a version before installing a payload elsewhere.
@@ -64,7 +65,7 @@ export default function DownloadPayloadDialog({ entry, onClose, onDownloaded }) 
         <div>
           {error && <div className="mb-3 rounded-lg border border-err/25 bg-err/10 px-3 py-2 text-xs text-err">{error}</div>}
           {!releases ? (
-            <div className="grid h-24 place-items-center text-sm text-text-dim">{t('common.loading')}</div>
+            <SkeletonRows count={3} />
           ) : releases.length === 0 ? (
             <div className="grid h-24 place-items-center text-center text-sm text-text-dim">{t('repositories.noReleases')}</div>
           ) : (

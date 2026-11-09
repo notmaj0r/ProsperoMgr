@@ -1,4 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import EmojiText from '../components/EmojiText.jsx'
+import UpdateDialog from '../components/UpdateDialog.jsx'
+import TemperatureChart from '../components/TemperatureChart.jsx'
+import HardwareTab from '../components/HardwareTab.jsx'
+import { useUpdate } from '../lib/useUpdate.js'
 import Panel from '../components/Panel.jsx'
 import Button from '../components/Button.jsx'
 import Pill from '../components/Pill.jsx'
@@ -9,14 +14,17 @@ import PathPickerModal from '../components/PathPickerModal.jsx'
 import { SectionHero, SettingsSection, SettingsRow, MetricTile, CopyRow } from '../components/SettingsKit.jsx'
 import {
   SlidersIcon, PaletteIcon, FlaskIcon, InfoIcon, ThermometerIcon, MoonIcon, SunIcon, YoutubeIcon,
-  ExternalIcon, GithubIcon, ShieldIcon, ClockIcon, PowerIcon, UserIcon, LaunchIcon, AlertTriangleIcon,
-  FolderIcon, PlusIcon, DeleteIcon, GripIcon,
+  ExternalIcon, GithubIcon, ShieldIcon, PowerIcon, UserIcon, AlertTriangleIcon,
+  FolderIcon, PlusIcon, DeleteIcon, CpuIcon,
 } from '../components/icons.jsx'
-import { EFFECTS_KEY, applyEffects, loadReducedEffects } from '../lib/effects.js'
+import { EFFECTS_KEY, applyEffects, isPS5, loadReducedEffects } from '../lib/effects.js'
 import { api } from '../lib/api.js'
+import { JOBS_AUTOCLEAR_KEY, JOBS_AUTOCLEAR_OPTIONS, loadJobsAutoClear } from '../lib/jobsAutoClear.js'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useI18n } from '../lib/i18n.jsx'
+import { usePolling } from '../lib/usePolling.js'
 import { formatFileSize, volumeLabel} from '../lib/format.js'
+import { SkeletonRows } from '../components/Skeleton.jsx'
 
 // Third-party lookup tool for the offline-activation help panel — returns a decimal
 // Account ID, which still needs converting to hex before it's usable here.
@@ -31,7 +39,7 @@ function suggestAccountId(name) {
   for (let i = 0; i < name.length; i++) {
     base = (PRIME * (base ^ BigInt(name.charCodeAt(i)))) & MASK
   }
-  return '0x' + base.toString(16)
+  return '0x' + base.toString(16).padStart(16, '0')
 }
 
 function tempStatusWord(c, warm, hot, t) {
@@ -59,8 +67,7 @@ function clampPct(value, min, max) {
   return Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100))
 }
 
-// Circular gauge for the single "hottest sensor" headline reading — the four flat number
-// boxes this replaced didn't communicate at a glance how close a reading sits to the warm/hot zone.
+// Circular gauge for the hottest sensor, so how close it sits to the warm/hot zone reads at a glance.
 function TempGauge({ label, c, min, max, warm, hot, fahrenheit, size = 116 }) {
   const stroke = 9
   const r = (size - stroke) / 2
@@ -116,19 +123,19 @@ function TempBar({ label, c, min, max, warm, hot, fahrenheit, t }) {
 function ThermalPanel() {
   const { t } = useI18n()
   const [thermal, setThermal] = useState(null)
+  const [history, setHistory] = useState([])
   const [target, setTarget] = useState(70)
   const [adjusting, setAdjusting] = useState(false)
   const [busy, setBusy] = useState(false)
   const [fahrenheit, setFahrenheit] = useState(() => window.localStorage.getItem(FAN_UNIT_KEY) === 'F')
   const showToast = useToast()
 
-  const load = () => api.thermal.status().then(setThermal).catch(() => setThermal({ ok: false }))
+  const load = () => {
+    api.thermal.history().then((r) => setHistory(r.samples || [])).catch(() => {})
+    return api.thermal.status().then(setThermal).catch(() => setThermal({ ok: false }))
+  }
 
-  useEffect(() => {
-    load()
-    const id = setInterval(load, 4000)
-    return () => clearInterval(id)
-  }, [])
+  usePolling(load, 4000)
 
   useEffect(() => {
     if (thermal?.threshold_c && !adjusting) setTarget(thermal.threshold_c)
@@ -228,6 +235,16 @@ function ThermalPanel() {
             </div>
           </div>
 
+          <SettingsSection title={t('settings.chartTitle')} description={t('settings.chartDesc')}>
+            <TemperatureChart
+              samples={history}
+              warm={thermal.warm_c}
+              hot={thermal.hot_c}
+              toDisplay={(c) => (fahrenheit ? toF(c) : c)}
+              unit={fahrenheit ? 'F' : 'C'}
+            />
+          </SettingsSection>
+
           <SettingsSection
             title={t('settings.coolingBehaviorTitle')}
             description={t('settings.coolingBehaviorDesc')}
@@ -316,8 +333,7 @@ const THEMES = [
 
 function ThemePanel() {
   const { t } = useI18n()
-  // A previously-saved 'contrast' (removed) falls back to dark instead of
-  // rendering an unstyled theme attribute with no matching CSS.
+  // A saved theme that no longer exists falls back to dark, since it has no matching CSS.
   const [theme, setTheme] = useState(() => {
     const saved = window.localStorage.getItem(THEME_KEY)
     return THEMES.some((th) => th.id === saved) ? saved : 'dark'
@@ -412,6 +428,7 @@ function GeneralTab() {
   const [system, setSystem] = useState(null)
   const [confirmingShutdown, setConfirmingShutdown] = useState(false)
   const [payloadsDirPickerOpen, setPayloadsDirPickerOpen] = useState(false)
+  const [jobsAutoClear, setJobsAutoClear] = useState(loadJobsAutoClear)
   const [savingPayloadsDir, setSavingPayloadsDir] = useState(false)
   const showToast = useToast()
 
@@ -420,6 +437,11 @@ function GeneralTab() {
     api.paths().then(setPaths).catch(() => {})
     api.system.info().then(setSystem).catch(() => {})
   }, [])
+
+  const changeJobsAutoClear = (seconds) => {
+    setJobsAutoClear(seconds)
+    try { window.localStorage.setItem(JOBS_AUTOCLEAR_KEY, String(seconds)) } catch { /* the choice just will not be remembered */ }
+  }
 
   // payloads_dir above still reports the running process's current value — the new
   // one only takes effect after ProsperoMgr.elf restarts, so it's not reflected here yet.
@@ -505,17 +527,39 @@ function GeneralTab() {
         />
       )}
 
-      <CollapsibleSection title={t('settings.technicalDetails')} defaultOpen={false}>
-        <div className="text-sm">
-          <CopyRow label={t('settings.copyModel')} value={system?.model} />
-          <CopyRow label={t('settings.copyFirmwareSdk')} value={system?.firmware || system?.sdk_version} />
-          <CopyRow label={t('settings.copyUserId')} value={system?.user_id} />
-          <CopyRow label={t('settings.copyRootDir')} value={paths?.root_dir} />
-          <CopyRow label={t('settings.copyPayloadsDir')} value={paths?.payloads_dir} />
-          <CopyRow label={t('settings.copyBundledDir')} value={paths?.bundled_dir} />
-          <CopyRow label={t('settings.copyAutoloaderIni')} value={paths?.autoloader_ini} />
-        </div>
-      </CollapsibleSection>
+      <SettingsSection title={t('settings.jobsAutoClearTitle')} description={t('settings.jobsAutoClearDesc')}>
+        <SettingsRow
+          title={t('settings.jobsAutoClearLabel')}
+          control={
+            <select
+              value={jobsAutoClear}
+              onChange={(e) => changeJobsAutoClear(Number(e.target.value))}
+              aria-label={t('settings.jobsAutoClearLabel')}
+              className="h-9 rounded-lg border border-panel-border bg-bg/45 px-2 text-sm font-semibold text-text outline-none transition-colors focus:border-accent"
+            >
+              {JOBS_AUTOCLEAR_OPTIONS.map((seconds) => (
+                <option key={seconds} value={seconds}>
+                  {seconds === 0 ? t('settings.jobsAutoClearNever') : seconds >= 60 ? t('settings.jobsAutoClearMinutes', { count: seconds / 60 }) : t('settings.jobsAutoClearSeconds', { count: seconds })}
+                </option>
+              ))}
+            </select>
+          }
+        />
+      </SettingsSection>
+
+      <div className="pmgr-surface mb-4 overflow-hidden rounded-2xl border border-panel-border bg-panel">
+        <CollapsibleSection title={t('settings.technicalDetails')} defaultOpen={false}>
+          <div className="text-sm">
+            <CopyRow label={t('settings.copyModel')} value={system?.model} />
+            <CopyRow label={t('settings.copyFirmwareSdk')} value={system?.firmware || system?.sdk_version} />
+            <CopyRow label={t('settings.copyUserId')} value={system?.user_id} />
+            <CopyRow label={t('settings.copyRootDir')} value={paths?.root_dir} />
+            <CopyRow label={t('settings.copyPayloadsDir')} value={paths?.payloads_dir} />
+            <CopyRow label={t('settings.copyBundledDir')} value={paths?.bundled_dir} />
+            <CopyRow label={t('settings.copyAutoloaderIni')} value={paths?.autoloader_ini} />
+          </div>
+        </CollapsibleSection>
+      </div>
 
       <SettingsSection title={t('settings.dangerZone')} description={t('settings.dangerZoneDesc')} className="border-err/25">
         <SettingsRow
@@ -537,511 +581,6 @@ function GeneralTab() {
           }
         />
       )}
-    </div>
-  )
-}
-
-function BundledAutostartToggle() {
-  const { t } = useI18n()
-  const [enabled, setEnabled] = useState(true)
-  const [busy, setBusy] = useState(false)
-  const showToast = useToast()
-
-  useEffect(() => {
-    api.autoloader.getBundledAutostart().then((r) => setEnabled(r.enabled)).catch(() => {})
-  }, [])
-
-  const toggle = () => {
-    const next = !enabled
-    setBusy(true)
-    api.autoloader
-      .setBundledAutostart(next)
-      .then(() => {
-        setEnabled(next)
-        showToast(t(next ? 'settings.autostartOnToast' : 'settings.autostartOffToast'))
-      })
-      .catch((e) => showToast(e.message, 'err'))
-      .finally(() => setBusy(false))
-  }
-
-  return (
-    <SettingsRow
-      title={t('settings.autostartBundledTitle')}
-      description={t('settings.autostartBundledDesc')}
-      control={<Toggle checked={enabled} onChange={toggle} disabled={busy} label={t('settings.autostartBundledTitle')} />}
-    />
-  )
-}
-
-function AutoloaderEditor() {
-  const { t } = useI18n()
-  const [enabled, setEnabled] = useState(false)
-  const [delay, setDelay] = useState(5)
-  const [delayDraft, setDelayDraft] = useState('5')
-  const [settleMs, setSettleMs] = useState(500)
-  const [retries, setRetries] = useState(0)
-  const [continueOnError, setContinueOnError] = useState(true)
-  const [sequence, setSequence] = useState([])
-  const [payloadNames, setPayloadNames] = useState([])
-  const [disabledPayloadNames, setDisabledPayloadNames] = useState([])
-  const [status, setStatus] = useState(null)
-  const [paths, setPaths] = useState(null)
-  const [saveState, setSaveState] = useState('idle') // 'idle' | 'saving' | 'saved' | 'error'
-  const [running, setRunning] = useState(false)
-  const [confirmRunAgain, setConfirmRunAgain] = useState(false)
-  const [error, setError] = useState('')
-  const [draggingIndex, setDraggingIndex] = useState(-1)
-  const [dragOverIndex, setDragOverIndex] = useState(-1)
-  const dragIndexRef = useRef(-1)
-  const showToast = useToast()
-
-  // Autosave bookkeeping that must survive renders without causing one: whether the
-  // first GET landed, the current and last-confirmed config, and any save in flight.
-  const hydratedRef = useRef(false)
-  const latestConfigRef = useRef(null)
-  const savedKeyRef = useRef(null)
-  const inFlightRef = useRef(null)
-  const savedFadeRef = useRef(null)
-
-  const currentConfig = { enabled, delay, settle_ms: settleMs, retries, continue_on_error: continueOnError, sequence }
-  latestConfigRef.current = currentConfig
-  const configKey = JSON.stringify(currentConfig)
-
-  const load = () => {
-    api.autoloader.getConfig().then((c) => {
-      hydratedRef.current = false // the state updates below are hydration, not a user edit
-      setEnabled(c.enabled)
-      setDelay(c.delay)
-      setDelayDraft(String(c.delay))
-      setSettleMs(c.settle_ms ?? 500)
-      setRetries(c.retries ?? 0)
-      setContinueOnError(c.continue_on_error ?? true)
-      setSequence(c.sequence)
-      const key = JSON.stringify({
-        enabled: c.enabled, delay: c.delay, settle_ms: c.settle_ms ?? 500,
-        retries: c.retries ?? 0, continue_on_error: c.continue_on_error ?? true, sequence: c.sequence,
-      })
-      savedKeyRef.current = key
-      // Flip back only once the state above has committed, or the next render
-      // autosaves the config we just loaded.
-      window.setTimeout(() => { hydratedRef.current = true }, 0)
-    })
-    api.payloads.list().then((r) => {
-      setPayloadNames(r.payloads.map((p) => p.name))
-      setDisabledPayloadNames(r.payloads.filter((p) => !p.enabled).map((p) => p.name))
-    })
-    api.autoloader.status().then(setStatus).catch(() => {})
-  }
-
-  useEffect(() => {
-    load()
-    api.paths().then(setPaths).catch(() => {})
-    const id = setInterval(() => api.autoloader.status().then(setStatus).catch(() => {}), 1200)
-    return () => clearInterval(id)
-  }, [])
-
-  // Never more than one save in flight: overlapping requests can land out of order
-  // and silently revert. A change during a save is picked up by its `finally`.
-  const trySave = () => {
-    if (inFlightRef.current) return inFlightRef.current
-    const configToSave = latestConfigRef.current
-    const keyBeingSaved = JSON.stringify(configToSave)
-    if (keyBeingSaved === savedKeyRef.current) return Promise.resolve()
-
-    setSaveState('saving')
-    const promise = api.autoloader.setConfig(configToSave)
-      .then(() => {
-        savedKeyRef.current = keyBeingSaved
-        setSaveState('saved')
-        setError('')
-        window.clearTimeout(savedFadeRef.current)
-        savedFadeRef.current = window.setTimeout(() => setSaveState((s) => (s === 'saved' ? 'idle' : s)), 2000)
-      })
-      .catch((e) => {
-        setSaveState('error')
-        setError(e.message)
-        throw e
-      })
-      .finally(() => {
-        inFlightRef.current = null
-        if (JSON.stringify(latestConfigRef.current) !== savedKeyRef.current) trySave()
-      })
-    inFlightRef.current = promise
-    return promise
-  }
-
-  // Debounced autosave — waits for a quiet moment after the last edit
-  // instead of saving on every keystroke/click.
-  useEffect(() => {
-    if (!hydratedRef.current) return
-    const timer = window.setTimeout(() => { trySave().catch(() => {}) }, 550)
-    return () => window.clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configKey])
-
-  const commitDelay = (raw) => {
-    const parsed = parseInt(raw, 10)
-    // Clearing a field mid-edit must not autosave 0, so only a valid number
-    // updates the saved value.
-    if (Number.isFinite(parsed) && parsed >= 0) setDelay(Math.min(parsed, 300))
-  }
-
-  const [customDelay, setCustomDelay] = useState('1000')
-
-  const removeStep = (i) => setSequence((current) => current.filter((_, idx) => idx !== i))
-  const moveStep = (i, dir) => {
-    const j = i + dir
-    setSequence((current) => {
-      if (j < 0 || j >= current.length) return current
-      const next = [...current]
-      ;[next[i], next[j]] = [next[j], next[i]]
-      return next
-    })
-  }
-  const addLoad = (name) => setSequence((current) => [...current, { type: 'load', value: name }])
-  const addDelay = (ms) => setSequence((current) => [...current, { type: 'delay', value: String(ms) }])
-
-  const endDrag = () => {
-    dragIndexRef.current = -1
-    setDraggingIndex(-1)
-    setDragOverIndex(-1)
-  }
-
-  const dropStep = (toIndex) => {
-    const fromIndex = dragIndexRef.current
-    if (fromIndex >= 0 && fromIndex !== toIndex) {
-      setSequence((current) => {
-        if (fromIndex >= current.length || toIndex >= current.length) return current
-        const next = [...current]
-        const [step] = next.splice(fromIndex, 1)
-        next.splice(toIndex, 0, step)
-        return next
-      })
-    }
-    endDrag()
-  }
-
-  // Drop a queued payload from Available so it can't be added twice by a stray
-  // double-click.
-  const usedLoadNames = new Set(sequence.filter((s) => s.type === 'load').map((s) => s.value))
-  const available = payloadNames.filter((n) => !usedLoadNames.has(n) && !disabledPayloadNames.includes(n))
-  const missing = [...usedLoadNames].filter((name) => !payloadNames.includes(name))
-  const disabledQueued = [...usedLoadNames].filter((name) => disabledPayloadNames.includes(name))
-  const kstuffCount = sequence.filter((s) => s.type === 'load' && /kstuff/i.test(s.value)).length
-  const hasEtaHen = sequence.some((s) => s.type === 'load' && /etahen/i.test(s.value))
-  const issues = [
-    ...(missing.length ? [t('settings.issueMissingPayloads', { count: missing.length, list: missing.join(', ') })] : []),
-    ...(disabledQueued.length ? [t('settings.issueEnableBeforeAutoloading', { list: disabledQueued.join(', ') })] : []),
-    ...(kstuffCount > 1 ? [t('settings.issueMultipleKstuff')] : []),
-    ...(kstuffCount > 0 && hasEtaHen ? [t('settings.issueEtaHenKstuff')] : []),
-    ...(sequence.every((s) => s.type !== 'load') ? [t('settings.issueNoPayload')] : []),
-  ]
-
-  // A manual run bypasses the startup guard and launches everything. Flushes any
-  // pending autosave first and refuses to run if that save fails.
-  const runSequence = async () => {
-    setError('')
-    if (JSON.stringify(latestConfigRef.current) !== savedKeyRef.current) {
-      try {
-        await trySave()
-      } catch (e) {
-        setError(e.message)
-        return
-      }
-      // Covers a change that raced in right as the flush above resolved.
-      if (JSON.stringify(latestConfigRef.current) !== savedKeyRef.current) {
-        try {
-          await trySave()
-        } catch (e) {
-          setError(e.message)
-          return
-        }
-      }
-    }
-    setRunning(true)
-    try {
-      await api.autoloader.run()
-      showToast(t('settings.sequenceStartedToast'))
-      setStatus(await api.autoloader.status())
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setRunning(false)
-    }
-  }
-
-  return (
-    <div>
-      <SectionHero
-        icon={<PowerIcon size={18} />}
-        title={t('settings.tabAutoloader')}
-        description={t('settings.autoloaderDesc')}
-        status={
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {saveState !== 'idle' && (
-              <span className="flex items-center gap-1.5 text-xs text-text-dim">
-                {saveState === 'saving' && <><span className="pmgr-live-dot text-info" /> {t('settings.savingEllipsis')}</>}
-                {saveState === 'saved' && <span className="text-ok">✓ {t('settings.savedStatus')}</span>}
-                {saveState === 'error' && (
-                  <span className="flex items-center gap-1.5 text-err">
-                    {t('settings.couldntSave')}
-                    <button type="button" onClick={() => trySave().catch(() => {})} className="font-semibold underline underline-offset-2">
-                      {t('common.retry')}
-                    </button>
-                  </span>
-                )}
-              </span>
-            )}
-            {status?.already_loaded && !status?.running && <Pill tone="ok">{t('settings.alreadyLoadedPill')}</Pill>}
-            <Pill tone={status?.running ? 'info' : enabled ? 'ok' : 'neutral'} live={status?.running}>
-              {status?.running ? t('common.running') : t(enabled ? 'settings.autoloaderPillEnabled' : 'settings.autoloaderPillDisabled')}
-            </Pill>
-          </div>
-        }
-      />
-
-      {status?.running && (
-        <SettingsSection className="border-info/30">
-          <div className="flex items-center justify-between gap-3" aria-live="polite">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-sm font-semibold text-text">
-                <span className="pmgr-live-dot text-info shrink-0" />
-                <span className="truncate">{status.current || t(status.remaining_seconds > 0 ? 'settings.statusWaitingDelay' : 'settings.statusPreparing')}</span>
-              </div>
-              <div className="mt-0.5 text-xs text-text-dim">
-                {t('settings.stepOfTotal', { done: status.done, total: status.total })}
-                {status.remaining_seconds > 0 ? t('settings.startingInSeconds', { seconds: status.remaining_seconds }) : ''}
-              </div>
-            </div>
-            <Button
-              size="sm"
-              tone="danger"
-              onClick={() => api.autoloader.abort().then(() => api.autoloader.status().then(setStatus))}
-            >
-              {t('common.cancel')}
-            </Button>
-          </div>
-          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-panel-border">
-            <div className="h-full rounded-full bg-info transition-[width] duration-500" style={{ width: `${status.total ? (status.done / status.total) * 100 : 4}%` }} />
-          </div>
-        </SettingsSection>
-      )}
-
-      {error && <div className="mb-4 rounded-xl border border-err/25 bg-err/10 px-3 py-2 text-sm text-err">{error}</div>}
-
-      <SettingsSection title={t('settings.startupBehaviorTitle')} description={t('settings.startupBehaviorDesc')}>
-        <SettingsRow
-          title={t('settings.autoloaderRowTitle')}
-          description={t('settings.autoloaderRowDesc')}
-          control={<Toggle checked={enabled} onChange={setEnabled} label={t('settings.autoloaderEnabledLabel')} />}
-        />
-        <SettingsRow
-          title={t('settings.startupDelayTitle')}
-          description={t('settings.startupDelayDesc')}
-          control={
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min="0"
-                value={delayDraft}
-                onChange={(e) => { setDelayDraft(e.target.value); commitDelay(e.target.value) }}
-                onBlur={() => setDelayDraft(String(delay))}
-                className="w-16 rounded-md border border-panel-border bg-bg px-2 py-1.5 text-sm text-text outline-none focus:border-accent"
-              />
-              <span className="text-sm text-text-dim">{t('settings.seconds')}</span>
-            </div>
-          }
-        />
-        <SettingsRow
-          title={t('settings.retriesTitle')}
-          description={t('settings.retriesDesc')}
-          control={
-            <select value={retries} onChange={(e) => setRetries(Number(e.target.value))} className="rounded-md border border-panel-border bg-bg px-2 py-1.5 text-sm outline-none focus:border-accent">
-              <option value={0}>{t('settings.none')}</option><option value={1}>1</option><option value={2}>2</option><option value={3}>3</option>
-            </select>
-          }
-        />
-        <SettingsRow
-          title={t('settings.timeBetweenTitle')}
-          description={t('settings.timeBetweenDesc')}
-          control={
-            <select value={settleMs} onChange={(e) => setSettleMs(Number(e.target.value))} className="rounded-md border border-panel-border bg-bg px-2 py-1.5 text-sm outline-none focus:border-accent">
-              <option value={0}>{t('settings.none')}</option><option value={500}>0.5s</option><option value={1000}>1s</option><option value={2000}>2s</option>
-            </select>
-          }
-        />
-        <SettingsRow
-          title={t('settings.continueOnFailureTitle')}
-          description={t('settings.continueOnFailureDesc')}
-          control={<Toggle checked={continueOnError} onChange={setContinueOnError} label={t('settings.continueOnFailureLabel')} />}
-        />
-        <BundledAutostartToggle />
-      </SettingsSection>
-
-      {issues.length > 0 && (
-        <SettingsSection title={t('settings.sequenceNeedsAttention')} className="border-warn/30">
-          <div className="space-y-2">
-            {issues.map((issue) => (
-              <div key={issue} className="flex items-start gap-2 text-sm text-warn">
-                <AlertTriangleIcon size={14} className="mt-0.5 shrink-0" />
-                <span>{issue}</span>
-              </div>
-            ))}
-          </div>
-        </SettingsSection>
-      )}
-      {!status?.running && status?.last_error && (
-        <SettingsSection title={t('settings.lastRunFailed')} className="border-err/30">
-          <div className="flex items-start gap-2 text-sm text-err">
-            <AlertTriangleIcon size={14} className="mt-0.5 shrink-0" />
-            <span>{status.last_error}</span>
-          </div>
-        </SettingsSection>
-      )}
-
-      <SettingsSection title={t('settings.sequenceTitle')} description={t('settings.sequenceDesc')}>
-        {sequence.length === 0 ? (
-          <div className="pmgr-empty-state py-8 text-center text-sm text-text-dim">
-            <div className="font-semibold text-text">{t('settings.noStepsTitle')}</div>
-            <div className="mt-1">{t('settings.noStepsDesc')}</div>
-          </div>
-        ) : (
-          <div>
-            {sequence.map((step, i) => {
-              const isLoad = step.type === 'load'
-              const invalid = isLoad && !payloadNames.includes(step.value)
-              const disabledStep = isLoad && !invalid && disabledPayloadNames.includes(step.value)
-              return (
-                <div key={i}>
-                  {/* A thin connector between steps — an ordered workflow,
-                      not just an unordered list of rows. */}
-                  {i > 0 && <div className="ml-[19px] h-2 w-px bg-panel-border" />}
-                  <div
-                    onDragOver={(event) => {
-                      if (dragIndexRef.current < 0) return
-                      event.preventDefault()
-                      event.dataTransfer.dropEffect = 'move'
-                      setDragOverIndex(i)
-                    }}
-                    onDrop={(event) => { event.preventDefault(); dropStep(i) }}
-                    className={`pmgr-row-in flex items-center gap-2.5 rounded-lg border px-2.5 py-2 ${
-                      invalid ? 'border-err/30 bg-err/5' : disabledStep ? 'border-warn/30 bg-warn/5' : 'border-panel-border'
-                    } ${draggingIndex === i ? 'opacity-40' : ''} ${dragOverIndex === i && draggingIndex !== i ? 'border-t-2 border-t-accent bg-accent/[0.06]' : ''}`}
-                    style={{ '--ti': i }}
-                  >
-                    <span
-                      draggable="true"
-                      role="img"
-                      aria-label={t('settings.dragToReorder')}
-                      title={t('settings.dragToReorder')}
-                      onDragStart={(event) => {
-                        dragIndexRef.current = i
-                        setDraggingIndex(i)
-                        setDragOverIndex(-1)
-                        event.dataTransfer.effectAllowed = 'move'
-                        event.dataTransfer.setData('text/plain', String(i))
-                      }}
-                      onDragEnd={endDrag}
-                      className="-ml-1 grid h-7 w-5 shrink-0 cursor-grab place-items-center text-text-dim opacity-60 hover:opacity-100 active:cursor-grabbing"
-                    >
-                      <GripIcon size={15} />
-                    </span>
-                    <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-panel-border text-[10px] font-bold text-text-dim">
-                      {i + 1}
-                    </span>
-                    <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg ${
-                      invalid ? 'bg-err/10 text-err' : disabledStep ? 'bg-warn/10 text-warn' : isLoad ? 'bg-info/10 text-info' : 'bg-panel-border text-text-dim'
-                    }`}>
-                      {isLoad ? <LaunchIcon size={13} /> : <ClockIcon size={13} />}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium text-text" dir={isLoad ? 'ltr' : undefined}>{isLoad ? step.value : t('settings.waitMs', { ms: step.value })}</span>
-                      {invalid && <span className="text-xs text-err">{t('settings.payloadNotFound')}</span>}
-                      {disabledStep && <span className="text-xs text-warn">{t('settings.disabledEnableFirst')}</span>}
-                    </span>
-                    <Button size="icon" tone="ghost" title={t('settings.moveUp')} onClick={() => moveStep(i, -1)} disabled={i === 0}>↑</Button>
-                    <Button size="icon" tone="ghost" title={t('settings.moveDown')} onClick={() => moveStep(i, 1)} disabled={i === sequence.length - 1}>↓</Button>
-                    <Button size="icon" tone="danger" title={t('common.remove')} onClick={() => removeStep(i)}>✕</Button>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
-      </SettingsSection>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <SettingsSection title={t('settings.addToSequenceTitle')} description={t('settings.addToSequenceDesc')}>
-          <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
-            {available.map((n) => (
-              <button
-                key={n}
-                onClick={() => addLoad(n)}
-                className="flex w-full items-center justify-between rounded-md border border-panel-border px-2.5 py-2 text-left text-sm text-text transition-colors hover:border-accent/50 hover:bg-panel-border"
-              >
-                <span className="truncate">{n}</span>
-                <span className="shrink-0 text-xs text-text-dim">{t('settings.addAction')}</span>
-              </button>
-            ))}
-            {available.length === 0 && (
-              <div className="rounded-md border border-dashed border-panel-border py-4 text-center text-xs text-text-dim">
-                {t(payloadNames.length === 0 ? 'settings.noPayloadsInstalled' : 'settings.allPayloadsQueued')}
-              </div>
-            )}
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          title={t('settings.addWaitTitle')}
-          description={t('settings.addWaitDesc')}
-        >
-          <div className="flex flex-wrap items-center gap-1.5">
-            {[1000, 3000, 5000].map((ms) => (
-              <Button key={ms} size="sm" tone="neutral" onClick={() => addDelay(ms)}>{t('settings.addSeconds', { seconds: ms / 1000 })}</Button>
-            ))}
-            <input
-              type="number"
-              min="0"
-              value={customDelay}
-              onChange={(e) => setCustomDelay(e.target.value)}
-              className="w-20 rounded-md border border-panel-border bg-bg px-2 py-1.5 text-xs text-text outline-none focus:border-accent"
-            />
-            <Button size="sm" tone="neutral" onClick={() => customDelay && addDelay(parseInt(customDelay, 10) || 0)}>
-              {t('settings.addAction')}
-            </Button>
-          </div>
-        </SettingsSection>
-      </div>
-
-      <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
-        <Button
-          tone="primary"
-          sheen
-          onClick={() => (status?.already_loaded ? setConfirmRunAgain(true) : runSequence())}
-          disabled={running || status?.running || issues.length > 0}
-        >
-          {status?.running ? t('settings.sequenceRunning') : t(status?.already_loaded ? 'settings.runSequenceAgain' : 'settings.runSequenceNow')}
-        </Button>
-      </div>
-      {issues.length > 0 && !status?.running && (
-        <div className="mt-1 text-right text-xs text-text-dim">{t('settings.resolveIssuesFirst')}</div>
-      )}
-
-      {confirmRunAgain && (
-        <ConfirmDialog
-          title={t('settings.runAgainTitle')}
-          description={t('settings.runAgainDesc')}
-          confirmLabel={t('settings.runAgainConfirm')}
-          onClose={() => setConfirmRunAgain(false)}
-          onConfirm={runSequence}
-        />
-      )}
-
-      <CollapsibleSection title={t('settings.technicalDetails')} defaultOpen={false}>
-        <div className="text-sm">
-          <CopyRow label={t('settings.copyAutoloaderConfigFile')} value={paths?.autoloader_ini} />
-        </div>
-      </CollapsibleSection>
     </div>
   )
 }
@@ -1071,7 +610,7 @@ function AccountsPanel() {
   const select = (s, nextMode) => {
     setSelectedSlot(s)
     setMode(nextMode)
-    const existing = s.id_hex !== '0x0'
+    const existing = !/^0x0+$/i.test(s.id_hex)
     setAccountId(existing ? s.id_hex : suggestAccountId(s.name))
     setIdSource(existing ? 'existing' : 'suggested')
   }
@@ -1328,7 +867,7 @@ function ShadowMountPanel() {
     <div className="mt-6 border-t border-panel-border pt-6">
       <SectionHero icon={<FolderIcon size={18} />} title={t('settings.smpTitle')} description={t('settings.smpDesc')} />
       {loading ? (
-        <div className="text-sm text-text-dim">{t('common.loading')}</div>
+        <SkeletonRows count={2} />
       ) : (
         <div className="rounded-xl border border-panel-border bg-bg/45 p-3.5">
           {usingDefaults ? (
@@ -1390,6 +929,13 @@ function ExperimentalPanel() {
     </div>
   )
 }
+
+const THANKS_CHANNELS = [
+  { name: 'Explosão do Game', url: 'https://www.youtube.com/@Explosaodogame' },
+  { name: 'Henrique Louro', url: 'https://www.youtube.com/@HenriqueLouroYT' },
+  { name: 'BX-AM', url: 'https://www.youtube.com/@GAMERAMBX' },
+  { name: 'MODDED WARFARE', url: 'https://www.youtube.com/@MODDEDWARFARE' },
+]
 
 const REFERENCE_CREDITS = [
   {
@@ -1463,14 +1009,53 @@ const REFERENCE_CREDITS = [
   },
 ]
 
+function UpdatesSection() {
+  const { t } = useI18n()
+  const showToast = useToast()
+  const { status, refresh, working } = useUpdate()
+  const [dialogOpen, setDialogOpen] = useState(false)
+
+  const check = () => api.update.check().then(refresh).catch((e) => showToast(e.message, 'err'))
+  const setAuto = (enabled) => api.update.setAuto(enabled).then(refresh).catch((e) => showToast(e.message, 'err'))
+
+  const summary = !status ? '…'
+    : status.state === 'checking' ? t('update.checking')
+    : status.available ? t('update.newVersion', { version: status.latest })
+    : status.error ? status.error
+    : status.latest ? t('update.upToDate', { current: status.current })
+    : t('update.notChecked', { current: status.current })
+
+  return (
+    <SettingsSection title={t('update.sectionTitle')} description={t('update.sectionDesc')}>
+      <SettingsRow
+        title={summary}
+        control={
+          status?.available ? (
+            <Button tone="primary" sheen onClick={() => setDialogOpen(true)}>{t('update.now')}</Button>
+          ) : (
+            <Button tone="neutral" onClick={check} disabled={working}>{working ? t('update.checking') : t('update.check')}</Button>
+          )
+        }
+      />
+      <SettingsRow
+        title={t('update.autoTitle')}
+        description={t('update.autoDesc')}
+        control={<Toggle checked={Boolean(status?.auto_update)} onChange={setAuto} disabled={!status} label={t('update.autoTitle')} />}
+      />
+      {dialogOpen && status && <UpdateDialog status={status} refresh={refresh} onClose={() => setDialogOpen(false)} />}
+    </SettingsSection>
+  )
+}
+
 function AboutPanel() {
   const { t } = useI18n()
   return (
     <Panel title={t('settings.tabAbout')}>
+      <UpdatesSection />
       <div className="text-sm leading-relaxed text-text-dim">
         <p className="text-text">{t('settings.aboutTagline')}</p>
         <p className="mt-1">
-          {t('settings.aboutMadeBy', { name: 'maj0r' })} — 🇧🇷
+          {t('settings.aboutMadeBy', { name: 'maj0r' })} — <EmojiText text="🇧🇷" />
         </p>
         <p className="mt-1">{t('settings.aboutForUsers')}</p>
         <p className="mt-3">
@@ -1483,22 +1068,27 @@ function AboutPanel() {
           >
             <GithubIcon size={15} /> ProsperoMgr
           </a>{' '}
-          {t('settings.aboutStarPrompt')}
+          <EmojiText text={t('settings.aboutStarPrompt')} />
         </p>
       </div>
 
       <div className="mt-5 border-t border-panel-border pt-4">
         <div className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-text-dim">{t('settings.specialThanks')}</div>
-        <a
-          href="https://www.youtube.com/@Explosaodogame"
-          target="_blank"
-          rel="noreferrer"
-          className="pmgr-thanks-card group flex items-center gap-3 rounded-xl border border-panel-border bg-bg/45 p-3 text-text"
-        >
-          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-red-600 text-white shadow-[0_10px_28px_-12px_#dc2626]"><YoutubeIcon size={23} /></span>
-          <span className="min-w-0 flex-1"><strong className="block truncate">Explosão do Game</strong><small className="text-text-dim">YouTube</small></span>
-          <ExternalIcon size={17} />
-        </a>
+        <div className="space-y-2">
+          {THANKS_CHANNELS.map((channel) => (
+            <a
+              key={channel.url}
+              href={channel.url}
+              target="_blank"
+              rel="noreferrer"
+              className="pmgr-thanks-card group flex items-center gap-3 rounded-xl border border-panel-border bg-bg/45 p-3 text-text"
+            >
+              <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-red-600 text-white shadow-[0_10px_28px_-12px_#dc2626]"><YoutubeIcon size={23} /></span>
+              <span className="min-w-0 flex-1"><strong className="block truncate">{channel.name}</strong><small className="text-text-dim">YouTube</small></span>
+              <ExternalIcon size={17} />
+            </a>
+          ))}
+        </div>
       </div>
 
       <div className="mt-5 border-t border-panel-border pt-4">
@@ -1544,9 +1134,9 @@ function AboutPanel() {
 
 const TABS = [
   { id: 'general', labelKey: 'settings.tabGeneral', icon: SlidersIcon },
-  { id: 'autoloader', labelKey: 'settings.tabAutoloader', icon: PowerIcon },
   { id: 'appearance', labelKey: 'settings.tabAppearance', icon: PaletteIcon },
   { id: 'thermal', labelKey: 'settings.tabThermal', icon: ThermometerIcon },
+  { id: 'hardware', labelKey: 'hardware.title', icon: CpuIcon },
   { id: 'experimental', labelKey: 'settings.tabExperimental', icon: FlaskIcon },
   { id: 'about', labelKey: 'settings.tabAbout', icon: InfoIcon },
 ]
@@ -1563,6 +1153,7 @@ export default function SettingsView({ settingsTab, onNavigate }) {
   }
 
   const moveTabFocus = (event, index) => {
+    if (isPS5()) return
     let next = null
     if (event.key === 'ArrowRight') next = (index + 1) % TABS.length
     if (event.key === 'ArrowLeft') next = (index - 1 + TABS.length) % TABS.length
@@ -1604,7 +1195,6 @@ export default function SettingsView({ settingsTab, onNavigate }) {
 
       <div key={tab} id="pmgr-settings-panel" role="tabpanel" aria-labelledby={`pmgr-settings-tab-${tab}`} className="pmgr-view-enter">
         {tab === 'general' && <GeneralTab />}
-        {tab === 'autoloader' && <AutoloaderEditor />}
         {tab === 'appearance' && (
           <>
             <ThemePanel />
@@ -1612,6 +1202,7 @@ export default function SettingsView({ settingsTab, onNavigate }) {
           </>
         )}
         {tab === 'thermal' && <ThermalPanel />}
+        {tab === 'hardware' && <HardwareTab />}
         {tab === 'experimental' && <ExperimentalPanel />}
         {tab === 'about' && <AboutPanel />}
       </div>

@@ -7,7 +7,7 @@
 
 namespace prospero {
 
-inline constexpr const char *kVersion = "1.1";
+inline constexpr const char *kVersion = "1.2";
 inline constexpr const char *kAuthor = "maj0r";
 
 struct Config {

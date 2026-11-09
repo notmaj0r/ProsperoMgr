@@ -11,11 +11,18 @@ int sceUserServiceGetUserName(int32_t user_id, char *name, size_t max_size);
 int sceUserServiceSetUserName(int32_t user_id, const char *name);
 
 int sceSystemServiceLaunchApp(const char *title_id, char **argv, void *ctx);
+int sceSystemServiceLaunchWebBrowser(const char *uri);
 int sceSystemServiceGetAppIdOfRunningBigApp(void);
+int sceSystemServiceKillApp(int app_id, int how, int reason, int core_dump);
 int sceSystemServiceGetAppTitleId(int app_id, char *title_id /* char[16] */);
 int sceSystemServiceParamGetInt(int32_t param_id, int32_t *value);
 
 int sceAppInstUtilInitialize(void);
+
+// Power actions, all exported by libSceSystemService.
+int sceSystemServiceRequestReboot(void);
+int sceSystemStateMgrEnterStandby(int trigger);
+int sceShellCoreUtilRequestShutdown(int type);
 
 // RegMgr — read/write triplet for offline account activation. No SDK
 // header ships these.

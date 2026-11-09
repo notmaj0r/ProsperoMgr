@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useBackLayer } from '../lib/backLayer.js'
 import { useDismiss } from '../lib/useDismiss.js'
 import { useAnchoredPosition } from '../lib/useAnchoredPosition.js'
 import { useI18n, LOCALES } from '../lib/i18n.jsx'
+import { isPS5 } from '../lib/effects.js'
 
 // Compact flag button — desktop gets an anchored popover (same placement logic as ActionMenu),
 // narrow layouts a bottom sheet. Native language name is always in the DOM too, not just the flag.
@@ -14,6 +16,7 @@ export default function LanguagePicker() {
   const menuRef = useRef(null)
   const menuFocusedRef = useRef(false)
   const { closing, close } = useDismiss(() => setOpen(false))
+  useBackLayer(open, close)
   const { pos, measure } = useAnchoredPosition(open && !mobile)
 
   const current = LOCALES.find((l) => l.id === locale) || LOCALES[0]
@@ -60,7 +63,7 @@ export default function LanguagePicker() {
   }, [open])
 
   const onMenuKeyDown = (event) => {
-    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    if (isPS5() || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
     const items = Array.from(menuRef.current?.querySelectorAll('[role="menuitemradio"]') || [])
     if (items.length === 0) return
     event.preventDefault()

@@ -7,6 +7,7 @@ import { useDismiss } from '../lib/useDismiss.js'
 import { useDialogAccessibility } from '../lib/useDialogAccessibility.js'
 import { useI18n } from '../lib/i18n.jsx'
 import { formatFileSize } from '../lib/format.js'
+import { SkeletonRows } from './Skeleton.jsx'
 
 // Folder -> {folders, files} map from the flat entry list. Ancestor folders are inferred
 // from file paths too, not just is_dir entries — not every archive has explicit dir entries.
@@ -148,7 +149,7 @@ export default function ArchiveInspectorModal({ path, name, onClose, onExtractAl
                 {passwordError && <div className="text-xs text-err">{passwordError}</div>}
               </div>
             ) : !info && !error ? (
-              <div className="grid h-40 place-items-center text-sm text-text-dim">{t('common.loading')}</div>
+              <SkeletonRows count={5} />
             ) : folderRows.length === 0 && fileRows.length === 0 ? (
               <div className="grid h-40 place-items-center text-center text-sm text-text-dim">
                 <span><FolderIcon size={28} /><span className="mt-2 block">{t('files.emptyFolderTitle')}</span></span>

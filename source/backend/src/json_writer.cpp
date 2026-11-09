@@ -35,7 +35,7 @@ std::string JsonExtractString(const std::string &json, const std::string &key) {
         }
         pos++;
     }
-    return out;
+    return NameFromUtf8(out);
 }
 
 bool JsonExtractBool(const std::string &json, const std::string &key, bool default_value) {
@@ -154,7 +154,7 @@ std::vector<std::string> JsonExtractStringArray(const std::string &json, const s
             }
             pos++;
         }
-        out.push_back(std::move(item));
+        out.push_back(NameFromUtf8(item));
         pos++; // skip closing quote
 
         while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) pos++;

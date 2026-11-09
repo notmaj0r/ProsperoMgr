@@ -1,6 +1,7 @@
 #include "titles.hpp"
 
 #include <dirent.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 #include <cstdint>
@@ -12,8 +13,13 @@
 #include <set>
 #include <unordered_map>
 
+#include "exfat_image.hpp"
+#include "file_manager.hpp"
 #include "https_client.hpp"
 #include "json_writer.hpp"
+#include "log.hpp"
+#include "notify.hpp"
+#include "notify_text.hpp"
 #include "ps5_services.hpp"
 
 #include "sqlite3.h"
@@ -33,7 +39,42 @@ bool IsNonEmptyFile(const std::string &path) {
     struct stat st {};
     return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
 }
+
+// The console writes to app.db during installs; waiting briefly beats an empty list.
+int OpenAppDb(sqlite3 **db) {
+    int rc = sqlite3_open_v2("/system_data/priv/mms/app.db", db, SQLITE_OPEN_READONLY, nullptr);
+    if (rc == SQLITE_OK) sqlite3_busy_timeout(*db, 1500);
+    return rc;
+}
 } // namespace
+
+bool TitleInstallSize(const std::string &title_id, uint64_t *out) {
+    if (!IsSafeTitleId(title_id)) return false;
+
+    static std::mutex cache_mu;
+    static std::unordered_map<std::string, uint64_t> cache;
+    {
+        std::lock_guard<std::mutex> lock(cache_mu);
+        auto found = cache.find(title_id);
+        if (found != cache.end()) { *out = found->second; return true; }
+    }
+
+    static const char *const kRoots[] = {
+        "/user/app/", "/user/patch/", "/mnt/ext0/user/app/", "/mnt/ext1/user/app/", nullptr,
+    };
+    uint64_t total = 0;
+    bool any = false;
+    for (int i = 0; kRoots[i]; i++) {
+        uint64_t size = 0;
+        std::string err;
+        if (NativeDirectorySize(kRoots[i] + title_id, &size, &err)) { total += size; any = true; }
+    }
+    if (!any) return false;
+    std::lock_guard<std::mutex> lock(cache_mu);
+    cache[title_id] = total;
+    *out = total;
+    return true;
+}
 
 std::string TitleIconPath(const std::string &title_id) {
     if (!IsSafeTitleId(title_id)) return "";
@@ -48,7 +89,7 @@ std::string TitleIconPath(const std::string &title_id) {
 
     std::string result;
     sqlite3 *db = nullptr;
-    if (sqlite3_open_v2("/system_data/priv/mms/app.db", &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
+    if (OpenAppDb(&db) == SQLITE_OK) {
         sqlite3_stmt *stmt = nullptr;
         const char *sql =
             "SELECT icon0Info FROM tbl_contentinfo WHERE titleId=?1 AND icon0Info IS NOT NULL "
@@ -128,7 +169,6 @@ std::string DerivePlatform(const std::string &title_id) {
 
 namespace {
 
-constexpr const char *kAppDbPath = "/system_data/priv/mms/app.db";
 
 // app.db's tbl_appbrowse.titleName is legitimately blank for a lot of real titles (fpkg/PS4
 // especially) — falls back to param.sfo ("\0PSF" magic), the authoritative source every title ships.
@@ -365,7 +405,7 @@ bool TableHasColumn(sqlite3 *db, const char *table, const char *column) {
     bool found = false;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const unsigned char *name = sqlite3_column_text(stmt, 1);
-        if (name && column == reinterpret_cast<const char *>(name)) {
+        if (name && std::strcmp(column, reinterpret_cast<const char *>(name)) == 0) {
             found = true;
             break;
         }
@@ -403,6 +443,54 @@ bool ReadAppInfoTitleName(sqlite3 *db, const std::string &title_id, std::string 
     return false;
 }
 
+constexpr const char *kGamePrefixList[] = {"CUSA", "PPSA", "ULUS", "ULES", "ULJS", "ULKS", "SLUS", "SCUS",
+                                           "SLES", "SCES", "SLPS", "SLPM", "SCED", "SLED", "SCPS"};
+
+bool IsGameTitleId(const std::string &title_id) {
+    for (const char *prefix : kGamePrefixList) {
+        if (title_id.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+}
+
+std::string GamePrefixSql() {
+    std::string sql;
+    for (const char *prefix : kGamePrefixList) {
+        if (!sql.empty()) sql += " OR ";
+        sql += std::string("titleId LIKE '") + prefix + "%'";
+    }
+    return sql;
+}
+
+// An app is anything that is not a game: third-party media apps, homebrew and other tools. app.db marks them
+// with is3rdPartyVideoApp or the app category bit; installed games carry neither.
+void MarkApps(sqlite3 *db, std::vector<TitleInfo> *titles) {
+    std::unordered_map<std::string, bool> is_app;
+    if (TableExists(db, "tbl_contentinfo")) {
+        bool has_video_flag = TableHasColumn(db, "tbl_contentinfo", "is3rdPartyVideoApp");
+        bool has_category = TableHasColumn(db, "tbl_contentinfo", "categoryType");
+        std::string sql = std::string("SELECT titleId, ") + (has_video_flag ? "COALESCE(is3rdPartyVideoApp,0)" : "0") + ", " +
+                          (has_category ? "COALESCE(categoryType,0)" : "0") + " FROM tbl_contentinfo";
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char *id = sqlite3_column_text(stmt, 0);
+                if (!id) continue;
+                bool app = sqlite3_column_int(stmt, 1) != 0 || (sqlite3_column_int64(stmt, 2) & 0x10000) != 0;
+                is_app[reinterpret_cast<const char *>(id)] = app;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    for (TitleInfo &title : *titles) {
+        auto found = is_app.find(title.title_id);
+        if ((found != is_app.end() && found->second) || !IsGameTitleId(title.title_id)) {
+            title.kind = "app";
+            title.platform = "APP";
+        }
+    }
+}
+
 void RunTitleQuery(sqlite3 *db, const char *sql, std::vector<TitleInfo> *out) {
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
@@ -419,6 +507,7 @@ void RunTitleQuery(sqlite3 *db, const char *sql, std::vector<TitleInfo> *out) {
         const char *name_str = name ? reinterpret_cast<const char *>(name) : "";
         info.name = *name_str ? name_str : info.title_id;
         info.platform = DerivePlatform(info.title_id);
+        info.kind = "game";
         info.icon_path = TitleIconPath(info.title_id);
         out->push_back(std::move(info));
     }
@@ -470,7 +559,7 @@ void MergeActivity(sqlite3 *db, std::unordered_map<std::string, Activity> *activ
 
 } // namespace
 
-std::vector<TitleInfo> ListTitles(const Config &cfg) {
+std::vector<TitleInfo> ListTitles(const Config &cfg, bool include_apps) {
     // Home and Save Data can ask for this at the same time; serializing keeps
     // the app.db snapshot and the name cache coherent.
     static std::mutex list_mu;
@@ -479,18 +568,15 @@ std::vector<TitleInfo> ListTitles(const Config &cfg) {
     std::vector<TitleInfo> out;
 
     sqlite3 *db = nullptr;
-    if (sqlite3_open_v2(kAppDbPath, &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+    if (OpenAppDb(&db) != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return out;
     }
 
     // Real game title IDs only — the same table also holds system services,
     // media apps and store listings.
-    constexpr const char *kPrefixFilter =
-        " AND (titleId LIKE 'CUSA%' OR titleId LIKE 'PPSA%' OR titleId LIKE 'ULUS%' OR titleId LIKE 'ULES%' OR "
-        "titleId LIKE 'ULJS%' OR titleId LIKE 'ULKS%' OR titleId LIKE 'SLUS%' OR titleId LIKE 'SCUS%' OR "
-        "titleId LIKE 'SLES%' OR titleId LIKE 'SCES%' OR titleId LIKE 'SLPS%' OR titleId LIKE 'SLPM%' OR "
-        "titleId LIKE 'SCED%' OR titleId LIKE 'SLED%' OR titleId LIKE 'SCPS%')";
+    const std::string kGamePrefixes = GamePrefixSql();
+    const std::string kPrefixFilter = std::string(" AND (") + kGamePrefixes + ")";
 
     // A DB rebuild can drop a PS4 fpkg's browse row, so union both tables and
     // dedup by titleId, keeping whichever name isn't empty.
@@ -498,6 +584,13 @@ std::vector<TitleInfo> ListTitles(const Config &cfg) {
     bool has_appbrowse_name = has_appbrowse && TableHasColumn(db, "tbl_appbrowse", "titleName");
     bool has_cinfo = TableExists(db, "tbl_contentinfo");
     bool has_cinfo_name = has_cinfo && TableHasColumn(db, "tbl_contentinfo", "titleName");
+    bool has_uninstallable = has_cinfo && TableHasColumn(db, "tbl_contentinfo", "uninstallable");
+    // Installed apps and homebrew have their own title IDs; system entries (NPXS) cannot be uninstalled.
+    std::string cinfo_filter = kPrefixFilter;
+    if (include_apps && has_uninstallable) {
+        cinfo_filter = std::string(" AND (") + kGamePrefixes +
+                       " OR (uninstallable = 1 AND titleId NOT LIKE 'NPXS%'))";
+    }
 
     std::string sql;
     if (has_appbrowse) {
@@ -506,16 +599,17 @@ std::vector<TitleInfo> ListTitles(const Config &cfg) {
         std::string ci;
         if (has_cinfo) {
             ci = std::string(" UNION ALL SELECT titleId, ") + (has_cinfo_name ? "COALESCE(titleName,'')" : "''") +
-                 " AS n FROM tbl_contentinfo WHERE titleId IS NOT NULL AND titleId != ''" + kPrefixFilter;
+                 " AS n FROM tbl_contentinfo WHERE titleId IS NOT NULL AND titleId != ''" + cinfo_filter;
         }
         sql = "SELECT titleId, MAX(n) AS n FROM (" + ab + ci + ") GROUP BY titleId ORDER BY n COLLATE NOCASE";
     } else if (has_cinfo) {
         sql = std::string("SELECT DISTINCT titleId, ") + (has_cinfo_name ? "COALESCE(titleName,'')" : "''") +
-              " AS n FROM tbl_contentinfo WHERE titleId IS NOT NULL AND titleId != ''" + kPrefixFilter +
+              " AS n FROM tbl_contentinfo WHERE titleId IS NOT NULL AND titleId != ''" + cinfo_filter +
               " ORDER BY n COLLATE NOCASE";
     }
 
     if (!sql.empty()) RunTitleQuery(db, sql.c_str(), &out);
+    if (include_apps) MarkApps(db, &out);
 
     // Resolve localized names while app.db is still open; tbl_appinfo covers
     // rows that carry only a title ID.
@@ -577,13 +671,138 @@ std::vector<TitleInfo> ListTitles(const Config &cfg) {
     return out;
 }
 
-bool LaunchTitle(const std::string &title_id, std::string *err) {
+bool IdentifyGameFolder(const std::string &dir, GameFolderInfo *out) {
+    // An .exfat image is read in place, so its metadata never gets copied anywhere.
+    std::string image_param;
+    bool in_image = dir.size() > 6 && strcasecmp(dir.c_str() + dir.size() - 6, ".exfat") == 0 &&
+                    ReadExfatFile(dir, "sce_sys/param.json", 1024 * 1024, &image_param);
+    size_t slash = dir.find_last_of('/');
+    std::string base = slash == std::string::npos ? dir : dir.substr(slash + 1);
+    auto id_at = [](const std::string &text, size_t pos) {
+        if (text.size() < pos + 9) return false;
+        for (size_t i = 0; i < 9; i++) {
+            unsigned char c = static_cast<unsigned char>(text[pos + i]);
+            if (i < 4 ? !std::isalpha(c) : !std::isdigit(c)) return false;
+        }
+        return true;
+    };
+    // Dump folders are often named "Game 01.000.000 PPSA01234 LIZARD", so the ID can sit mid-name.
+    size_t start = std::string::npos;
+    if (id_at(base, 0)) start = 0;
+    for (size_t pos = 1; start == std::string::npos && pos + 9 <= base.size(); pos++) {
+        bool bounded = !std::isalnum(static_cast<unsigned char>(base[pos - 1])) &&
+                       (pos + 9 == base.size() || !std::isalnum(static_cast<unsigned char>(base[pos + 9])));
+        if (bounded && id_at(base, pos) && IsGameTitleId(base.substr(pos, 9))) start = pos;
+    }
+    if (start != std::string::npos) {
+        out->title_id = base.substr(start, 9);
+    } else {
+        // A renamed dump still carries its own title ID in sce_sys/param.json. sce_sys itself is not a game.
+        std::string id;
+        if (in_image) {
+            id = JsonExtractString(image_param, "titleId");
+        } else {
+            struct stat st {};
+            if (stat((dir + "/sce_sys").c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return false;
+            if (!ReadMetadataDir(dir, "titleId", "TITLE_ID", &id)) return false;
+        }
+        if (!id_at(id, 0) || !IsGameTitleId(id.substr(0, 9))) return false;
+        out->title_id = id.substr(0, 9);
+    }
+    for (char &c : out->title_id) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
+    std::string name;
+    bool found = in_image ? !(name = JsonExtractString(image_param, "titleName")).empty()
+                          : ReadMetadataDir(dir, "titleName", "TITLE", &name);
+    found = found && !IsUnresolvedName(out->title_id, name);
+    if (!found) found = ReadInstalledTitleName(out->title_id, &name);
+    if (!found) return false;
+    out->name = name;
+
+    out->in_image = in_image;
+    out->own_icon = in_image || IsNonEmptyFile(dir + "/sce_sys/icon0.png") || IsNonEmptyFile(dir + "/icon0.png");
+    out->icon_path = in_image                                       ? ""
+                     : IsNonEmptyFile(dir + "/sce_sys/icon0.png") ? dir + "/sce_sys/icon0.png"
+                     : IsNonEmptyFile(dir + "/icon0.png")         ? dir + "/icon0.png"
+                                                                  : TitleIconPath(out->title_id);
+    return true;
+}
+
+namespace {
+
+// The address a title's home-screen tile opens, empty when it has none.
+std::string DeeplinkOf(const std::string &title_id) {
+    std::string uri;
+    sqlite3 *db = nullptr;
+    if (OpenAppDb(&db) == SQLITE_OK &&
+        TableHasColumn(db, "tbl_contentinfo", "pprDeeplinkUri")) {
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(db, "SELECT pprDeeplinkUri FROM tbl_contentinfo WHERE titleId=?1 LIMIT 1", -1, &stmt, nullptr) ==
+            SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, title_id.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char *value = sqlite3_column_text(stmt, 0);
+                if (value) uri = reinterpret_cast<const char *>(value);
+            }
+        }
+        if (stmt) sqlite3_finalize(stmt);
+    }
+    if (db) sqlite3_close(db);
+    return uri;
+}
+
+std::string NameOfTitle(const std::string &title_id) {
+    std::string name;
+    sqlite3 *db = nullptr;
+    if (OpenAppDb(&db) == SQLITE_OK) {
+        sqlite3_stmt *stmt = nullptr;
+        if (sqlite3_prepare_v2(db, "SELECT titleName FROM tbl_contentinfo WHERE titleId=?1 LIMIT 1", -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, title_id.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char *value = sqlite3_column_text(stmt, 0);
+                if (value) name = reinterpret_cast<const char *>(value);
+            }
+        }
+        if (stmt) sqlite3_finalize(stmt);
+    }
+    if (db) sqlite3_close(db);
+    return name.empty() ? title_id : name;
+}
+
+} // namespace
+
+bool LaunchTitle(const std::string &title_id, std::string *err, bool *via_notification) {
     sceUserServiceInitialize(nullptr);
 
     uint32_t user_id = 0;
     if (sceUserServiceGetForegroundUser(&user_id) != 0 || user_id == 0) {
         if (err) *err = "no foreground user — sign in to a profile first";
         return false;
+    }
+
+    // Web-based homebrew tiles are bookmarks: the home screen opens their address in the browser, and launching
+    // them as an app is refused. Tiles of other kinds (psgm: apps and games) launch as apps.
+    std::string deeplink = DeeplinkOf(title_id);
+    bool is_web = deeplink.rfind("http://", 0) == 0 || deeplink.rfind("https://", 0) == 0;
+    if (is_web) {
+        int web_rc = sceSystemServiceLaunchWebBrowser(deeplink.c_str());
+        if (web_rc < 0) {
+            char code[16];
+            std::snprintf(code, sizeof(code), "%08x", static_cast<unsigned>(web_rc));
+            if (err) *err = std::string("sceSystemServiceLaunchWebBrowser failed (0x") + code + ")";
+            return false;
+        }
+        LogEvent("Opened " + title_id + " in the browser: " + deeplink);
+        return true;
+    }
+    // Other system addresses (pssettings:, ...) can only be opened by the shell itself, from a notification button.
+    if (!deeplink.empty() && deeplink.rfind("psgm:", 0) != 0) {
+        std::string name = NameOfTitle(title_id);
+        NotifyWithAction("Prospero Manager\n" + NotifyText(Msg::kOpenTitle, {{"name", name}}), NotifyText(Msg::kOpenTitle, {{"name", name}}),
+                         deeplink);
+        LogEvent("Sent a notification that opens " + title_id + " (" + deeplink + ")");
+        if (via_notification) *via_notification = true;
+        return true;
     }
 
     AppLaunchCtx ctx{};
@@ -610,6 +829,42 @@ std::string GetRunningTitleId() {
     char title_id[16] = {0};
     if (sceSystemServiceGetAppTitleId(app_id, title_id) != 0) return "";
     return title_id;
+}
+
+std::string DescribeTitleRemoval(const std::string &title_id) {
+    std::string text;
+    sqlite3 *db = nullptr;
+    if (OpenAppDb(&db) == SQLITE_OK) {
+        sqlite3_stmt *stmt = nullptr;
+        const char *sql = "SELECT uninstallable, contentStatus, dispLocation FROM tbl_contentinfo WHERE titleId=?1 LIMIT 1";
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, title_id.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                text = "app.db: uninstallable=" + std::to_string(sqlite3_column_int(stmt, 0)) +
+                       ", contentStatus=" + std::to_string(sqlite3_column_int(stmt, 1)) +
+                       ", dispLocation=" + std::to_string(sqlite3_column_int(stmt, 2));
+            }
+        }
+        if (stmt) sqlite3_finalize(stmt);
+    }
+    if (db) sqlite3_close(db);
+    return text;
+}
+
+bool CloseRunningTitle(std::string *err) {
+    int app_id = sceSystemServiceGetAppIdOfRunningBigApp();
+    if (app_id <= 0) {
+        if (err) *err = "no game is running";
+        return false;
+    }
+    int rc = sceSystemServiceKillApp(app_id, -1, 0, 0);
+    if (rc != 0) {
+        char code[16];
+        std::snprintf(code, sizeof(code), "0x%08x", static_cast<unsigned>(rc));
+        if (err) *err = std::string("the system refused to close the game (") + code + ")";
+        return false;
+    }
+    return true;
 }
 
 } // namespace prospero

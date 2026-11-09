@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -22,12 +23,14 @@ constexpr size_t kMaxLines = 500;
 
 std::mutex g_mu;
 std::deque<std::string> g_lines;
+uint64_t g_seq = 0; // lines ever appended
 std::atomic<bool> g_connected{false};
 std::atomic<bool> g_started{false};
 
 void AppendLine(const std::string &line) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_lines.push_back(line);
+    g_seq++;
     if (g_lines.size() > kMaxLines) g_lines.pop_front();
 }
 
@@ -83,6 +86,20 @@ void StartKlogTailer() {
     bool expected = false;
     if (!g_started.compare_exchange_strong(expected, true)) return; // already running
     StartBackgroundThread(TailerLoop);
+}
+
+uint64_t KlogMark() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return g_seq;
+}
+
+bool KlogSeenSince(uint64_t mark, const std::string &needle) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    size_t fresh = static_cast<size_t>(std::min<uint64_t>(g_seq - mark, g_lines.size()));
+    for (size_t i = g_lines.size() - fresh; i < g_lines.size(); i++) {
+        if (g_lines[i].find(needle) != std::string::npos) return true;
+    }
+    return false;
 }
 
 std::vector<std::string> GetKlogs() {
