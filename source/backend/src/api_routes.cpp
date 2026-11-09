@@ -43,6 +43,7 @@
 #include "ps5_services.hpp"
 #include "process_manager.hpp"
 #include "repository.hpp"
+#include "gdrive.hpp"
 #include "savedata.hpp"
 #include "self_update.hpp"
 #include "hw_info.hpp"
@@ -1156,11 +1157,16 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
 
     server->Route("POST", "/api/saves/backups/restore", [cfg](const HttpRequest &req) {
         std::string path = JsonExtractString(req.body, "path");
-        if (!IsSaveBackupPath(cfg, path)) return HttpResponse::Error("backup not found", 404);
+        // "gdrive://<file id>" names a backup in Google Drive; anything else must be a local backup.
+        const std::string drive_prefix = kGdrivePathPrefix;
+        const bool from_drive = path.rfind(drive_prefix, 0) == 0;
+        if (from_drive ? !IsValidGdriveId(path.substr(drive_prefix.size())) : !IsSaveBackupPath(cfg, path)) {
+            return HttpResponse::Error("backup not found", 404);
+        }
         // Backgrounded like import: a restore copies the save twice and would
         // otherwise hold the request open for the whole thing.
         bool snapshot_first = JsonExtractString(req.body, "snapshot_first") != "false";
-        std::string label = fs::path(fs::path(path).parent_path()).filename().string();
+        std::string label = from_drive ? "Google Drive" : fs::path(fs::path(path).parent_path()).filename().string();
         std::string err;
         if (!StartSaveRestoreJob(cfg, path, label, snapshot_first, &err)) {
             return HttpResponse::Error(err, 409);
@@ -1168,8 +1174,94 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
     });
 
+    // ---- Google Drive backup destination (see gdrive.hpp) --------------------------------------
+
+    auto gdrive_status_json = [cfg]() {
+        GdriveStatus g = GetGdriveStatus(cfg);
+        return JsonWriter()
+            .Bool("configured", g.configured)
+            .Bool("linked", g.linked)
+            .Bool("enabled", g.enabled)
+            .Bool("drive_only", g.drive_only)
+            .Str("client_id", g.client_id)
+            .Str("folder_name", g.folder_name)
+            .Str("link_phase", g.link_phase)
+            .Str("user_code", g.user_code)
+            .Str("verification_url", g.verification_url)
+            .Str("link_error", g.link_error)
+            .Done();
+    };
+
+    server->Route("GET", "/api/gdrive/status", [gdrive_status_json](const HttpRequest &) {
+        return HttpResponse::Json(gdrive_status_json());
+    });
+
+    // client_secret is write-only: an empty value keeps the stored one, and it is never sent back.
+    server->Route("POST", "/api/gdrive/config", [cfg, gdrive_status_json](const HttpRequest &req) {
+        std::string err;
+        if (!SetGdriveConfig(cfg, JsonExtractString(req.body, "client_id"), JsonExtractString(req.body, "client_secret"),
+                             JsonExtractBool(req.body, "enabled", false), JsonExtractBool(req.body, "drive_only", false),
+                             &err)) {
+            return HttpResponse::Error(err, 400);
+        }
+        return HttpResponse::Json(gdrive_status_json());
+    });
+
+    server->Route("POST", "/api/gdrive/link-start", [cfg, gdrive_status_json](const HttpRequest &) {
+        std::string err;
+        if (!StartGdriveLink(cfg, &err)) return HttpResponse::Error(err, 400);
+        return HttpResponse::Json(gdrive_status_json());
+    });
+
+    server->Route("POST", "/api/gdrive/link-cancel", [gdrive_status_json](const HttpRequest &) {
+        CancelGdriveLink();
+        return HttpResponse::Json(gdrive_status_json());
+    });
+
+    server->Route("POST", "/api/gdrive/unlink", [cfg, gdrive_status_json](const HttpRequest &) {
+        UnlinkGdrive(cfg);
+        return HttpResponse::Json(gdrive_status_json());
+    });
+
+    // Kept apart from /api/saves/backups on purpose: this one waits on the network, and a slow or
+    // offline Google must not hold up the local list.
+    server->Route("GET", "/api/gdrive/backups", [cfg](const HttpRequest &) {
+        std::vector<GdriveBackup> found;
+        std::string err, code;
+        if (!GdriveListBackups(cfg, &found, &err, &code)) {
+            return HttpResponse::Json(JsonWriter().Str("error", err).Str("error_code", code).Done(), 502);
+        }
+        std::map<std::string, std::string> names;
+        for (const auto &t : ListTitles(cfg)) names[t.title_id] = t.name;
+        std::vector<std::string> items;
+        for (const auto &b : found) {
+            auto it = names.find(b.title_id);
+            const std::string platform = b.title_id.rfind("PPSA", 0) == 0   ? "PS5"
+                                         : b.title_id.rfind("CUSA", 0) == 0 ? "PS4"
+                                                                            : "APP";
+            items.push_back(JsonWriter()
+                                .Str("title_id", b.title_id)
+                                .Str("title_name", it != names.end() && !it->second.empty() ? it->second : b.title_id)
+                                .Str("platform", platform)
+                                .Str("filename", b.name)
+                                .Str("path", std::string(kGdrivePathPrefix) + b.id)
+                                .Str("destination", "Google Drive")
+                                .Int("size_bytes", static_cast<long long>(b.size_bytes))
+                                .Int("created_unix", static_cast<long long>(b.created_unix))
+                                .Bool("remote", true)
+                                .Done());
+        }
+        return HttpResponse::Json(JsonWriter().Raw("backups", JsonWriter::Array(items)).Done());
+    });
+
     server->Route("POST", "/api/saves/backups/delete", [cfg](const HttpRequest &req) {
         std::string path = JsonExtractString(req.body, "path");
+        const std::string drive_prefix = kGdrivePathPrefix;
+        if (path.rfind(drive_prefix, 0) == 0) {
+            std::string err, code;
+            if (!GdriveDelete(cfg, path.substr(drive_prefix.size()), &err, &code)) return HttpResponse::Error(err, 502);
+            return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
+        }
         if (!IsSaveBackupPath(cfg, path)) return HttpResponse::Error("backup not found", 404);
         FileReadLease lease(path);
         if (!lease) return HttpResponse::Error(lease.Error(), 409);
