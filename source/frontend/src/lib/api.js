@@ -424,6 +424,17 @@ export const api = {
     deleteBackup: (path) => request('POST', '/api/saves/backups/delete', { path }),
   },
 
+  // Google Drive backup destination. client_secret is write-only: an empty string keeps the stored one.
+  gdrive: {
+    status: () => request('GET', '/api/gdrive/status'),
+    setConfig: (clientId, clientSecret, enabled, driveOnly = false) =>
+      request('POST', '/api/gdrive/config', { client_id: clientId, client_secret: clientSecret, enabled, drive_only: driveOnly }),
+    linkStart: () => request('POST', '/api/gdrive/link-start'),
+    linkCancel: () => request('POST', '/api/gdrive/link-cancel'),
+    unlink: () => request('POST', '/api/gdrive/unlink'),
+    backups: () => request('GET', '/api/gdrive/backups'),
+  },
+
   pkg: {
     // Both just start a background job — poll status() for progress.
     install: (opts) => request('POST', '/api/pkg/install', opts),

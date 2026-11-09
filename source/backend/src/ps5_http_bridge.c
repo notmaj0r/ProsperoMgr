@@ -233,9 +233,10 @@ static int ps5_dns_resolve(const char *hostname, char *ip_out, size_t ip_out_sz)
 
 // Substitutes a resolved IP into `url`'s host and fills `orig_host` with the
 // real hostname (empty if no substitution happened), for the Host header.
-static const char *bypass_dns(const char *url, char *resolved_url, size_t resolved_sz, char *orig_host,
-                              size_t orig_host_sz) {
+static const char *bypass_dns_ex(const char *url, char *resolved_url, size_t resolved_sz, char *orig_host,
+                                 size_t orig_host_sz, int public_dns_only, char *ip_out, size_t ip_out_sz) {
     orig_host[0] = '\0';
+    if (ip_out && ip_out_sz) ip_out[0] = '\0';
 
     const char *scheme_end = strstr(url, "://");
     if (!scheme_end) return url;
@@ -257,14 +258,22 @@ static const char *bypass_dns(const char *url, char *resolved_url, size_t resolv
     if (already_ip) { orig_host[0] = '\0'; return url; }
 
     char ip[64];
-    if (ps5_dns_resolve(orig_host, ip, sizeof(ip)) != 0 || !ip[0]) {
+    int resolved = public_dns_only ? public_dns_resolve(orig_host, ip, sizeof(ip))
+                                   : ps5_dns_resolve(orig_host, ip, sizeof(ip));
+    if (resolved != 0 || !ip[0]) {
         orig_host[0] = '\0';
         return url;
     }
+    if (ip_out && ip_out_sz) snprintf(ip_out, ip_out_sz, "%s", ip);
 
     size_t scheme_len = (size_t)(scheme_end - url);
     snprintf(resolved_url, resolved_sz, "%.*s%s%s", (int)scheme_len, url, ip, host_end);
     return resolved_url;
+}
+
+static const char *bypass_dns(const char *url, char *resolved_url, size_t resolved_sz, char *orig_host,
+                              size_t orig_host_sz) {
+    return bypass_dns_ex(url, resolved_url, resolved_sz, orig_host, orig_host_sz, 0, NULL, 0);
 }
 
 // ---- request context, torn down the same way on every exit path ----------
@@ -414,10 +423,9 @@ static int http_send_hop(http_ctx_t *ctx, const char *url, int bypass, int first
     return 0;
 }
 
-// Builds the full request pipeline, following any redirects itself. Returns
-// 0 on success; on failure the caller must still call http_ctx_close().
-static int http_open(http_ctx_t *ctx, const char *url, const char *header_name, const char *header_value,
-                     struct prosperomgr_http_result *result) {
+// Brings up net pool, SSL, HTTP context and the shared template — everything before the first
+// connection. Returns 0 on success; on failure the caller must still call http_ctx_close().
+static int http_setup(http_ctx_t *ctx, struct prosperomgr_http_result *result) {
     long long rc;
 
     g_stage = 1;
@@ -451,6 +459,14 @@ static int http_open(http_ctx_t *ctx, const char *url, const char *header_name, 
         set_result(result, PROSPEROMGR_HTTP_ERR_INIT, 0, rc);
         return -1;
     }
+    return 0;
+}
+
+// Builds the full request pipeline, following any redirects itself. Returns
+// 0 on success; on failure the caller must still call http_ctx_close().
+static int http_open(http_ctx_t *ctx, const char *url, const char *header_name, const char *header_value,
+                     struct prosperomgr_http_result *result) {
+    if (http_setup(ctx, result) != 0) return -1;
 
     char current[1024];
     snprintf(current, sizeof(current), "%s", url);
@@ -620,11 +636,12 @@ int prosperomgr_ps5_http_get(const char *url, char **out_body, size_t *out_len, 
 
 int prosperomgr_ps5_http_download(const char *url, const char *out_path, struct prosperomgr_http_result *result,
                                   prosperomgr_ps5_http_progress_fn progress, void *progress_opaque,
-                                  prosperomgr_ps5_http_cancel_fn cancel, void *cancel_opaque) {
+                                  prosperomgr_ps5_http_cancel_fn cancel, void *cancel_opaque,
+                                  const char *header_name, const char *header_value) {
     http_ctx_t ctx;
     http_ctx_init(&ctx);
 
-    if (http_open(&ctx, url, NULL, NULL, result) != 0) {
+    if (http_open(&ctx, url, header_name, header_value, result) != 0) {
         http_ctx_close(&ctx);
         return -1;
     }
@@ -722,6 +739,175 @@ int prosperomgr_ps5_http_download(const char *url, const char *out_path, struct 
     }
 
     if (progress) progress(loaded, total, progress_opaque); // always report the final state
+    return 0;
+}
+
+// ---- general request (POST / PUT / DELETE with an in-memory body) -----------------------------
+
+// Copies the value of response header `name` (case-insensitive) into `out`; "" when absent.
+static void http_header_value(int req, const char *name, char *out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+
+    char *headers = NULL;
+    size_t headers_len = 0;
+    if (sceHttpGetAllResponseHeaders(req, &headers, &headers_len) != 0 || !headers) return;
+
+    size_t name_len = strlen(name);
+    const char *end = headers + headers_len;
+    for (const char *line = headers; line < end;) {
+        const char *eol = memchr(line, '\n', (size_t)(end - line));
+        size_t line_len = eol ? (size_t)(eol - line) : (size_t)(end - line);
+        while (line_len && (line[line_len - 1] == '\r' || line[line_len - 1] == ' ')) line_len--;
+
+        if (line_len > name_len + 1 && line[name_len] == ':' && strncasecmp(line, name, name_len) == 0) {
+            const char *value = line + name_len + 1;
+            size_t value_len = line_len - name_len - 1;
+            while (value_len && (*value == ' ' || *value == '\t')) { value++; value_len--; }
+            if (value_len < out_sz) {
+                memcpy(out, value, value_len);
+                out[value_len] = '\0';
+            }
+            return;
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+}
+
+// One attempt at a request. Returns 0 once a status code was read back. `mode` picks how it connects:
+//   0: by the IP the console's own resolver gives, with an explicit Host header (like http_send_hop)
+//   1: by hostname, leaving resolution to sceHttp
+//   2: by an IP from public DNS, for a resolver that answers with an address nothing listens on
+static int http_request_hop(http_ctx_t *ctx, int method, const char *url, int mode,
+                            const struct prosperomgr_http_header *headers, size_t header_count,
+                            const void *body, size_t body_len, int *status_out,
+                            struct prosperomgr_http_result *result) {
+    long long rc;
+    char resolved_url[2048]; // Drive's resumable-upload session URLs are long
+    char orig_host[256];
+    const char *connect_url = url;
+
+    orig_host[0] = '\0';
+    if (result) {
+        result->resolved_ip[0] = '\0';
+        result->attempts++;
+    }
+    if (mode != 1) {
+        connect_url = bypass_dns_ex(url, resolved_url, sizeof(resolved_url), orig_host, sizeof(orig_host), mode == 2,
+                                    result ? result->resolved_ip : NULL, result ? sizeof(result->resolved_ip) : 0);
+        if (!orig_host[0]) return -1; // nothing resolved, so this attempt adds nothing
+    }
+
+    g_stage = 4;
+    if ((ctx->conn = sceHttpCreateConnectionWithURL(ctx->tmpl, connect_url, 0)) < 0) {
+        set_result(result, PROSPEROMGR_HTTP_ERR_CONNECT, 0, ctx->conn);
+        return -1;
+    }
+    http_set_timeouts(ctx->conn);
+
+    g_stage = 5;
+    if ((ctx->req = sceHttpCreateRequestWithURL(ctx->conn, method, connect_url, (uint64_t)body_len)) < 0) {
+        set_result(result, PROSPEROMGR_HTTP_ERR_CONNECT, 0, ctx->req);
+        return -1;
+    }
+    http_set_timeouts(ctx->req);
+    if (orig_host[0]) sceHttpAddRequestHeader(ctx->req, "Host", orig_host, 0);
+    for (size_t i = 0; i < header_count; i++) {
+        if (headers[i].name && headers[i].name[0] && headers[i].value) {
+            sceHttpAddRequestHeader(ctx->req, headers[i].name, headers[i].value, 0);
+        }
+    }
+
+    g_stage = 6;
+    if ((rc = sceHttpSendRequest(ctx->req, body_len ? body : NULL, body_len)) != 0) {
+        set_result(result, PROSPEROMGR_HTTP_ERR_SEND, 0, rc);
+        return -1;
+    }
+
+    g_stage = 7;
+    if ((rc = sceHttpGetStatusCode(ctx->req, status_out)) != 0) {
+        set_result(result, PROSPEROMGR_HTTP_ERR_CONNECT, 0, rc);
+        return -1;
+    }
+    return 0;
+}
+
+int prosperomgr_ps5_http_request(int method, const char *url, const struct prosperomgr_http_header *headers,
+                                 size_t header_count, const void *body, size_t body_len, char **out_body,
+                                 size_t *out_len, size_t max_body_bytes, char *out_location, size_t location_size,
+                                 char *out_range, size_t range_size, struct prosperomgr_http_result *result) {
+    http_ctx_t ctx;
+    http_ctx_init(&ctx);
+    if (out_body) *out_body = NULL;
+    if (out_len) *out_len = 0;
+    if (out_location && location_size) out_location[0] = '\0';
+    if (out_range && range_size) out_range[0] = '\0';
+
+    if (strncmp(url, "https://", 8) != 0) { // credentials and saves never travel in clear text
+        set_result(result, PROSPEROMGR_HTTP_ERR_INIT, 0, 0);
+        return -1;
+    }
+    if (http_setup(&ctx, result) != 0) {
+        http_ctx_close(&ctx);
+        return -1;
+    }
+
+    int status = 0;
+    int connected = 0;
+    for (int mode = 0; mode < 3 && !connected; mode++) {
+        if (http_request_hop(&ctx, method, url, mode, headers, header_count, body, body_len, &status, result) == 0) {
+            connected = 1;
+        } else {
+            http_close_request(&ctx);
+        }
+    }
+    if (!connected) {
+        http_ctx_close(&ctx);
+        return -1;
+    }
+    set_result(result, PROSPEROMGR_HTTP_OK, status, 0);
+
+    if (out_location) http_header_value(ctx.req, "Location", out_location, location_size);
+    if (out_range) http_header_value(ctx.req, "Range", out_range, range_size);
+
+    g_stage = 8;
+    size_t cap = 4096;
+    size_t off = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        http_ctx_close(&ctx);
+        set_result(result, PROSPEROMGR_HTTP_ERR_OTHER, status, 0);
+        return -1;
+    }
+
+    g_stage = 10;
+    int ok = 1;
+    for (;;) {
+        if (off + 4096 > cap) {
+            size_t new_cap = cap * 2;
+            if (new_cap > max_body_bytes + 1) new_cap = max_body_bytes + 1;
+            if (new_cap <= cap) { ok = 0; break; } // hit the cap
+            char *nb = (char *)realloc(buf, new_cap);
+            if (!nb) { ok = 0; break; }
+            buf = nb;
+            cap = new_cap;
+        }
+        int n = sceHttpReadData(ctx.req, buf + off, cap - off);
+        if (n < 0) { set_result(result, PROSPEROMGR_HTTP_ERR_READ, status, n); ok = 0; break; }
+        if (n == 0) break;
+        off += (size_t)n;
+        if (off > max_body_bytes) { ok = 0; break; }
+    }
+    http_ctx_close(&ctx);
+
+    if (!ok) {
+        free(buf);
+        if (result && result->kind == PROSPEROMGR_HTTP_OK) set_result(result, PROSPEROMGR_HTTP_ERR_OTHER, status, 0);
+        return -1;
+    }
+    if (out_body) *out_body = buf; else free(buf);
+    if (out_len) *out_len = off;
     return 0;
 }
 
