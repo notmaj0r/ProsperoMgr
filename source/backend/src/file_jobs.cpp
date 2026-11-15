@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -36,6 +37,9 @@ namespace prospero {
 namespace {
 
 constexpr size_t kCopyBuffer = 1024 * 1024;
+// Small files are mostly per-file latency, so a folder of them is copied by several threads at once.
+constexpr size_t kCopyThreads = 6;
+constexpr uint64_t kSmallCopyBytes = 8ull * 1024ull * 1024ull;
 constexpr uint64_t kCopySyncCheckpoint = 256ull * 1024ull * 1024ull;
 constexpr uint64_t kCopyPreallocateThreshold = 256ull * 1024ull * 1024ull;
 constexpr size_t kMaxJobs = 32;
@@ -323,8 +327,13 @@ bool SyncFile(int fd) {
     return rc == 0;
 }
 
+// `sync_data` false leaves flushing to the caller (one sync() after many small files instead of one per file).
+// `progress`, when set, is a counter shared by several copying threads and replaces `completed`.
 bool CopyFileSafely(const fs::path &source, const fs::path &staged, uint64_t job_id,
-                    uint64_t *completed, std::string *err) {
+                    uint64_t *completed, std::string *err, bool sync_data = true,
+                    std::atomic<uint64_t> *progress = nullptr) {
+    auto add_progress = [&](uint64_t bytes) { if (progress) progress->fetch_add(bytes); else *completed += bytes; };
+    auto progress_now = [&]() -> uint64_t { return progress ? progress->load() : *completed; };
     std::error_code ec;
     fs::create_directories(staged.parent_path(), ec);
     if (ec) {
@@ -406,6 +415,14 @@ bool CopyFileSafely(const fs::path &source, const fs::path &staged, uint64_t job
             if (n <= 0) {
                 if (n == 0) errno = ENOSPC;
                 int write_error = errno;
+                if (write_error == ENOSPC) {
+                    // The shown free space and what the drive accepts can differ, so keep both numbers.
+                    struct statvfs usage {};
+                    uint64_t free_now = statvfs(staged.parent_path().c_str(), &usage) == 0
+                                            ? static_cast<uint64_t>(usage.f_bavail) * usage.f_frsize : 0;
+                    LogEvent("Copy ran out of space after " + std::to_string(copied) + " of " + std::to_string(source_size) +
+                             " bytes; the drive reports " + std::to_string(free_now) + " bytes free: " + staged.parent_path().string());
+                }
                 if (err) *err = std::string("destination write failed: ") + std::strerror(write_error);
                 SetErrorCode(job_id, write_error == ENOSPC ? "no_space" : "write_failed");
                 close(in); close(out);
@@ -415,7 +432,7 @@ bool CopyFileSafely(const fs::path &source, const fs::path &staged, uint64_t job
         }
         copied += static_cast<uint64_t>(got);
         unsynced += static_cast<uint64_t>(got);
-        *completed += static_cast<uint64_t>(got);
+        add_progress(static_cast<uint64_t>(got));
         if (unsynced >= kCopySyncCheckpoint) {
             if (!SyncFile(out)) {
                 int sync_error = errno;
@@ -429,7 +446,7 @@ bool CopyFileSafely(const fs::path &source, const fs::path &staged, uint64_t job
         auto now = std::chrono::steady_clock::now();
         if (now - last_update >= kProgressThrottle) {
             last_update = now;
-            uint64_t snapshot = *completed;
+            uint64_t snapshot = progress_now();
             UpdateJob(job_id, [&](FileJobInfo &job) {
                 job.completed_bytes = snapshot;
                 job.current = source.string();
@@ -437,7 +454,7 @@ bool CopyFileSafely(const fs::path &source, const fs::path &staged, uint64_t job
         }
     }
     bool ok = !IsCanceled();
-    if (ok && unsynced > 0 && !SyncFile(out)) {
+    if (ok && sync_data && unsynced > 0 && !SyncFile(out)) {
         int sync_error = errno;
         if (err) *err = std::string("destination sync failed: ") + std::strerror(sync_error);
         SetErrorCode(job_id, "write_failed");
@@ -459,7 +476,7 @@ bool CopyFileSafely(const fs::path &source, const fs::path &staged, uint64_t job
         ok = false;
     }
     if (ok) {
-        uint64_t snapshot = *completed;
+        uint64_t snapshot = progress_now();
         UpdateJob(job_id, [&](FileJobInfo &job) {
             job.completed_bytes = snapshot;
             job.current = source.string();
@@ -569,10 +586,57 @@ bool CopyCollected(const fs::path &source, const fs::path &staged, const TreeCon
         }
         (void)chmod(created.c_str(), 0777);
     }
+    std::unordered_map<std::string, uint64_t> sizes;
+    for (const auto &entry : tree.snapshot) {
+        if (!entry.is_dir) sizes[entry.relative] = entry.size;
+    }
+    std::vector<const fs::path *> small, large;
     for (const auto &file : tree.files) {
+        auto found = sizes.find(file.lexically_relative(source).string());
+        (found != sizes.end() && found->second < kSmallCopyBytes ? small : large).push_back(&file);
+    }
+
+    if (small.size() > 1) {
+        std::atomic<size_t> next{0};
+        std::atomic<bool> stop{false};
+        std::atomic<uint64_t> progress{*completed};
+        std::mutex failure_mu;
+        std::string failure;
+        auto copy_files = [&]() {
+            for (;;) {
+                if (stop.load() || IsCanceled()) break;
+                size_t index = next.fetch_add(1);
+                if (index >= small.size()) break;
+                const fs::path &file = *small[index];
+                std::string file_err;
+                uint64_t unused = 0;
+                // Flushed once below instead of once per file.
+                if (!CopyFileSafely(file, staged / file.lexically_relative(source), job_id, &unused, &file_err, false, &progress)) {
+                    std::lock_guard<std::mutex> lock(failure_mu);
+                    if (failure.empty()) failure = file_err;
+                    stop = true;
+                    break;
+                }
+            }
+        };
+        std::vector<std::thread> pool;
+        for (size_t t = 0; t < std::min(kCopyThreads, small.size()); t++) pool.emplace_back(copy_files);
+        for (std::thread &worker : pool) worker.join();
+        *completed = progress.load();
+        if (!failure.empty()) {
+            if (err) *err = failure;
+            return false;
+        }
         if (IsCanceled()) return false;
-        fs::path relative = file.lexically_relative(source);
-        if (!CopyFileSafely(file, staged / relative, job_id, completed, err)) return false;
+        // The small files are only in the cache until here; the folder is published after this.
+        sync();
+    } else {
+        for (const fs::path *file : small) large.push_back(file);
+    }
+
+    for (const fs::path *file : large) {
+        if (IsCanceled()) return false;
+        if (!CopyFileSafely(*file, staged / file->lexically_relative(source), job_id, completed, err)) return false;
     }
     return !IsCanceled();
 }
@@ -1278,6 +1342,104 @@ bool RunUnrarExtraction(FileJobInfo job, std::string *err) {
     return true;
 }
 
+// Extracts one zip entry under `staged`. `sync_data` false leaves flushing to the caller. `progress` and `items`
+// are shared by the threads that extract at the same time.
+bool ExtractZipEntry(mz_zip_archive &zip, mz_uint index, const fs::path &staged, uint64_t job_id,
+                     std::vector<char> &buffer, bool sync_data, std::atomic<uint64_t> &progress,
+                     std::atomic<uint64_t> &items, std::string *err) {
+    if (IsCanceled()) return false;
+    mz_zip_archive_file_stat stat {};
+    if (!mz_zip_reader_file_stat(&zip, index, &stat)) return true;
+
+    fs::path relative;
+    SafeArchiveRelativePath(stat.m_filename, &relative, nullptr); // re-validated below; already passed once above
+    fs::path target = (staged / relative).lexically_normal();
+    if (!IsWithinRoot(staged, target)) {
+        if (err) *err = "archive contains an unsafe path: " + std::string(stat.m_filename);
+        SetErrorCode(job_id, "unsafe_path");
+        return false;
+    }
+
+    uint64_t item_index = items.fetch_add(1) + 1;
+    UpdateJob(job_id, [&](FileJobInfo &j) { j.current = stat.m_filename; j.current_index = item_index; });
+    std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);
+    if (ec) {
+        if (err) *err = "could not create directory for " + relative.string();
+        SetErrorCode(job_id, "create_failed");
+        return false;
+    }
+    (void)chmod(target.parent_path().c_str(), 0777);
+
+    auto *iter = mz_zip_reader_extract_iter_new(&zip, index, 0);
+    if (!iter) {
+        if (err) *err = std::string("could not read ") + stat.m_filename + " from the archive";
+        SetErrorCode(job_id, "crc_failed");
+        return false;
+    }
+    int out_fd = open(target.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0666);
+    if (out_fd < 0) {
+        mz_zip_reader_extract_iter_free(iter);
+        if (err) *err = "could not create " + relative.string();
+        SetErrorCode(job_id, "write_failed");
+        return false;
+    }
+    (void)fchmod(out_fd, 0777);
+
+    bool entry_ok = true;
+    uint64_t unsynced = 0;
+    auto last_update = std::chrono::steady_clock::now();
+    for (;;) {
+        if (IsCanceled()) { entry_ok = false; break; }
+        size_t got = mz_zip_reader_extract_iter_read(iter, buffer.data(), buffer.size());
+        if (got == 0) break; // end of this entry, or a failure — checked via iter_free() below
+        if (!WriteAll(out_fd, buffer.data(), got)) {
+            if (err) *err = "failed writing " + relative.string();
+            SetErrorCode(job_id, "write_failed");
+            entry_ok = false;
+            break;
+        }
+        progress.fetch_add(got);
+        unsynced += got;
+        if (unsynced >= kCopySyncCheckpoint) {
+            if (!SyncFile(out_fd)) {
+                if (err) *err = "failed syncing " + relative.string();
+                SetErrorCode(job_id, "write_failed");
+                entry_ok = false;
+                break;
+            }
+            unsynced = 0;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_update >= kProgressThrottle) {
+            last_update = now;
+            uint64_t snapshot = progress.load();
+            UpdateJob(job_id, [&](FileJobInfo &j) { j.completed_bytes = snapshot; });
+        }
+    }
+    bool decompress_ok = mz_zip_reader_extract_iter_free(iter) != 0;
+    if (entry_ok && sync_data && unsynced > 0 && !SyncFile(out_fd)) {
+        if (err) *err = "failed syncing " + relative.string();
+        SetErrorCode(job_id, "write_failed");
+        entry_ok = false;
+    }
+    if (close(out_fd) != 0 && entry_ok) {
+        if (err) *err = "failed closing " + relative.string();
+        SetErrorCode(job_id, "write_failed");
+        entry_ok = false;
+    }
+
+    if (!entry_ok || IsCanceled()) return false;
+    if (!decompress_ok) {
+        if (err) *err = "archive data is corrupt: " + std::string(stat.m_filename);
+        SetErrorCode(job_id, "crc_failed");
+        return false;
+    }
+    uint64_t snapshot = progress.load();
+    UpdateJob(job_id, [&](FileJobInfo &j) { j.completed_bytes = snapshot; });
+    return true;
+}
+
 // Streamed via mz_zip_reader_extract_iter_* instead of extract_to_file —
 // bounded memory, and cancellation/progress checked every buffer, not per file.
 bool RunUnzip(FileJobInfo job, std::string *err) {
@@ -1369,102 +1531,68 @@ bool RunUnzip(FileJobInfo job, std::string *err) {
     }
 
     std::vector<char> buffer(kExtractBuffer);
-    uint64_t completed = 0, item_index = 0;
+    std::atomic<uint64_t> progress{0};
+    std::atomic<uint64_t> items{0};
     bool ok = true;
+
+    // Small entries are mostly per-file latency, so several threads extract them at once, each with its own
+    // reader on the archive, and the files are flushed once at the end. Big entries go one at a time as before.
+    std::vector<mz_uint> small_entries, large_entries;
     for (mz_uint i : file_indices) {
-        if (IsCanceled()) { ok = false; break; }
-        mz_zip_archive_file_stat stat {};
-        if (!mz_zip_reader_file_stat(&zip, i, &stat)) continue;
-
-        fs::path relative;
-        SafeArchiveRelativePath(stat.m_filename, &relative, nullptr); // re-validated below; already passed once above
-        fs::path target = (staged / relative).lexically_normal();
-        if (!IsWithinRoot(staged, target)) {
-            if (err) *err = "archive contains an unsafe path: " + std::string(stat.m_filename);
-            SetErrorCode(job.id, "unsafe_path");
-            ok = false;
-            break;
-        }
-
-        item_index++;
-        UpdateJob(job.id, [&](FileJobInfo &j) { j.current = stat.m_filename; j.current_index = item_index; });
-        fs::create_directories(target.parent_path(), ec);
-        if (ec) {
-            if (err) *err = "could not create directory for " + relative.string();
-            SetErrorCode(job.id, "create_failed");
-            ok = false;
-            break;
-        }
-        (void)chmod(target.parent_path().c_str(), 0777);
-
-        auto *iter = mz_zip_reader_extract_iter_new(&zip, i, 0);
-        if (!iter) {
-            if (err) *err = std::string("could not read ") + stat.m_filename + " from the archive";
-            SetErrorCode(job.id, "crc_failed");
-            ok = false;
-            break;
-        }
-        int out_fd = open(target.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0666);
-        if (out_fd < 0) {
-            mz_zip_reader_extract_iter_free(iter);
-            if (err) *err = "could not create " + relative.string();
-            SetErrorCode(job.id, "write_failed");
-            ok = false;
-            break;
-        }
-        (void)fchmod(out_fd, 0777);
-
-        bool entry_ok = true;
-        uint64_t unsynced = 0;
-        auto last_update = std::chrono::steady_clock::now();
-        for (;;) {
-            if (IsCanceled()) { entry_ok = false; break; }
-            size_t got = mz_zip_reader_extract_iter_read(iter, buffer.data(), buffer.size());
-            if (got == 0) break; // end of this entry, or a failure — checked via iter_free() below
-            if (!WriteAll(out_fd, buffer.data(), got)) {
-                if (err) *err = "failed writing " + relative.string();
-                SetErrorCode(job.id, "write_failed");
-                entry_ok = false;
-                break;
+        mz_zip_archive_file_stat entry_stat {};
+        bool small = mz_zip_reader_file_stat(&zip, i, &entry_stat) && entry_stat.m_uncomp_size < kSmallCopyBytes;
+        (small ? small_entries : large_entries).push_back(i);
+    }
+    if (small_entries.size() > 1) {
+        std::atomic<size_t> next{0};
+        std::atomic<bool> stop{false};
+        std::mutex failure_mu;
+        std::string failure;
+        auto extract_entries = [&]() {
+            mz_zip_archive reader {};
+            if (!mz_zip_reader_init_file(&reader, source.c_str(), 0)) {
+                std::lock_guard<std::mutex> lock(failure_mu);
+                if (failure.empty()) failure = "could not open the zip — is it valid?";
+                SetErrorCode(job.id, "invalid_zip");
+                stop = true;
+                return;
             }
-            completed += got;
-            unsynced += got;
-            if (unsynced >= kCopySyncCheckpoint) {
-                if (!SyncFile(out_fd)) {
-                    if (err) *err = "failed syncing " + relative.string();
-                    SetErrorCode(job.id, "write_failed");
-                    entry_ok = false;
+            std::vector<char> local(kExtractBuffer);
+            for (;;) {
+                if (stop.load() || IsCanceled()) break;
+                size_t index = next.fetch_add(1);
+                if (index >= small_entries.size()) break;
+                std::string entry_err;
+                if (!ExtractZipEntry(reader, small_entries[index], staged, job.id, local, false, progress, items, &entry_err)) {
+                    std::lock_guard<std::mutex> lock(failure_mu);
+                    if (failure.empty()) failure = entry_err;
+                    stop = true;
                     break;
                 }
-                unsynced = 0;
             }
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_update >= kProgressThrottle) {
-                last_update = now;
-                uint64_t snapshot = completed;
-                UpdateJob(job.id, [&](FileJobInfo &j) { j.completed_bytes = snapshot; });
-            }
-        }
-        bool decompress_ok = mz_zip_reader_extract_iter_free(iter) != 0;
-        if (entry_ok && unsynced > 0 && !SyncFile(out_fd)) {
-            if (err) *err = "failed syncing " + relative.string();
-            SetErrorCode(job.id, "write_failed");
-            entry_ok = false;
-        }
-        if (close(out_fd) != 0 && entry_ok) {
-            if (err) *err = "failed closing " + relative.string();
-            SetErrorCode(job.id, "write_failed");
-            entry_ok = false;
-        }
-
-        if (!entry_ok || IsCanceled()) { ok = false; break; }
-        if (!decompress_ok) {
-            if (err) *err = "archive data is corrupt: " + std::string(stat.m_filename);
-            SetErrorCode(job.id, "crc_failed");
+            mz_zip_reader_end(&reader);
+        };
+        std::vector<std::thread> pool;
+        for (size_t t = 0; t < std::min(kCopyThreads, small_entries.size()); t++) pool.emplace_back(extract_entries);
+        for (std::thread &worker : pool) worker.join();
+        if (!failure.empty()) {
+            if (err) *err = failure;
             ok = false;
-            break;
+        } else if (IsCanceled()) {
+            ok = false;
+        } else {
+            sync();
         }
-        UpdateJob(job.id, [&](FileJobInfo &j) { j.completed_bytes = completed; });
+    } else {
+        for (mz_uint i : small_entries) large_entries.push_back(i);
+    }
+    for (mz_uint i : large_entries) {
+        if (!ok) break;
+        std::string entry_err;
+        if (!ExtractZipEntry(zip, i, staged, job.id, buffer, true, progress, items, &entry_err)) {
+            if (err) *err = entry_err;
+            ok = false;
+        }
     }
     mz_zip_reader_end(&zip);
 

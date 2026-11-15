@@ -41,6 +41,7 @@ enum class Msg {
     kDriveExtUsb,
     kDriveInternal,
     kOpenTitle,
+    kUpdateAvailable,
     kCount,
 };
 

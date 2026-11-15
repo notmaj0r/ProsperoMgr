@@ -92,7 +92,7 @@ void LogResult(const std::string &label, const prosperomgr_http_result &result) 
 } // namespace
 
 bool HttpsClient::Get(const std::string &url, HttpsResponse *out, std::string *err, NetErrorKind *kind,
-                      const std::string &bearer_token) {
+                      const std::string &bearer_token, bool quiet) {
     if (!out) {
         if (err) *err = "missing response destination";
         return false;
@@ -103,7 +103,7 @@ bool HttpsClient::Get(const std::string &url, HttpsResponse *out, std::string *e
 
     std::string label = RequestLabel(url);
     std::lock_guard<std::mutex> lock(g_transfer_mu);
-    LogEvent("PS5 HTTP GET begin: " + label);
+    if (!quiet) LogEvent("PS5 HTTP GET begin: " + label);
 
     std::string auth_value = bearer_token.empty() ? "" : ("Bearer " + bearer_token);
     prosperomgr_http_result result{};
@@ -112,7 +112,7 @@ bool HttpsClient::Get(const std::string &url, HttpsResponse *out, std::string *e
     int rc = prosperomgr_ps5_http_get(url.c_str(), &body, &body_len, kMaxBufferedResponse,
                                       bearer_token.empty() ? nullptr : "Authorization",
                                       bearer_token.empty() ? nullptr : auth_value.c_str(), &result);
-    LogResult(label, result);
+    if (!quiet || result.http_status != 404) LogResult(label, result);
 
     out->status = static_cast<int>(result.http_status);
 

@@ -12,6 +12,7 @@ import { useToast } from '../lib/ToastContext.jsx'
 import { useI18n } from '../lib/i18n.jsx'
 import { usePolling } from '../lib/usePolling.js'
 import AutoloaderLive from '../components/AutoloaderLive.jsx'
+import PayloadLogo from '../components/PayloadLogo.jsx'
 import { payloadOrigin } from '../lib/payloadOrigin.js'
 
 function BundledAutostartToggle() {
@@ -58,6 +59,7 @@ export default function AutoloaderView({ onNavigate }) {
   const [continueOnError, setContinueOnError] = useState(true)
   const [sequence, setSequence] = useState([])
   const [payloadList, setPayloadList] = useState([])
+  const [iconsPending, setIconsPending] = useState(false) // logos are still being looked up
   const [addSearch, setAddSearch] = useState('')
   const [loadState, setLoadState] = useState('loading') // 'loading' | 'ready' | 'error'
   const [loadError, setLoadError] = useState('')
@@ -99,6 +101,7 @@ export default function AutoloaderView({ onNavigate }) {
         setContinueOnError(c.continue_on_error ?? true)
         setSequence(c.sequence)
         setPayloadList(list.payloads)
+        setIconsPending(Boolean(list.icons_pending))
         savedKeyRef.current = JSON.stringify({
           enabled: c.enabled, delay: c.delay, settle_ms: c.settle_ms ?? 500,
           retries: c.retries ?? 0, continue_on_error: c.continue_on_error ?? true, sequence: c.sequence,
@@ -119,6 +122,21 @@ export default function AutoloaderView({ onNavigate }) {
     load()
     api.paths().then(setPaths).catch(() => {})
   }, [])
+
+  // Logos are looked up in the background. Only the payload list is asked for again, never the config,
+  // so nothing the user is editing is touched.
+  useEffect(() => {
+    if (!iconsPending) return undefined
+    const timer = window.setTimeout(() => {
+      api.payloads.list()
+        .then((r) => {
+          setPayloadList(r.payloads)
+          setIconsPending(Boolean(r.icons_pending))
+        })
+        .catch(() => {})
+    }, 2000)
+    return () => window.clearTimeout(timer)
+  }, [iconsPending, payloadList])
 
   // Quick while it runs, so the countdown shows every second even on the console.
   usePolling(() => api.autoloader.status().then(setStatus).catch(() => {}), status?.running ? 350 : 1200)
@@ -208,7 +226,8 @@ export default function AutoloaderView({ onNavigate }) {
   // Drop a queued payload from Available so it can't be added twice by a stray
   // double-click.
   const payloadNames = payloadList.map((p) => p.name)
-  const payloadInfo = Object.fromEntries(payloadList.map((p) => [p.name, { version: p.installed_version, size: p.size_bytes, origin: payloadOrigin(p) }]))
+  const payloadInfo = Object.fromEntries(payloadList.map((p) => [p.name, { version: p.installed_version, size: p.size_bytes, origin: payloadOrigin(p), iconRepo: p.icon_repo }]))
+  const iconRepoByName = Object.fromEntries(payloadList.filter((p) => p.icon_repo).map((p) => [p.name, p.icon_repo]))
   const disabledPayloadNames = payloadList.filter((p) => !p.enabled).map((p) => p.name)
   const usedLoadNames = new Set(sequence.filter((s) => s.type === 'load').map((s) => s.value))
   const available = payloadList.filter((p) => p.enabled && !usedLoadNames.has(p.name))
@@ -438,11 +457,18 @@ export default function AutoloaderView({ onNavigate }) {
                     <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-panel-border text-[10px] font-bold text-text-dim">
                       {i + 1}
                     </span>
-                    <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg ${
-                      invalid ? 'bg-err/10 text-err' : disabledStep ? 'bg-warn/10 text-warn' : isLoad ? 'bg-info/10 text-info' : 'bg-panel-border text-text-dim'
-                    }`}>
-                      {isLoad ? <LaunchIcon size={13} /> : <ClockIcon size={13} />}
-                    </span>
+                    {(() => {
+                      const stepIcon = (
+                        <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg ${
+                          invalid ? 'bg-err/10 text-err' : disabledStep ? 'bg-warn/10 text-warn' : isLoad ? 'bg-info/10 text-info' : 'bg-panel-border text-text-dim'
+                        }`}>
+                          {isLoad ? <LaunchIcon size={13} /> : <ClockIcon size={13} />}
+                        </span>
+                      )
+                      // A payload with a logo shows it in the same 28px slot; a missing payload keeps the red icon.
+                      const logoRepo = isLoad && !invalid ? iconRepoByName[step.value] : ''
+                      return logoRepo ? <PayloadLogo repo={logoRepo} size="xs" dim={disabledStep} fallback={stepIcon} /> : stepIcon
+                    })()}
                     <span className="min-w-0 flex-[1_1_8rem]">
                       <span className="block truncate text-sm font-medium text-text" dir={isLoad ? 'ltr' : undefined}>{isLoad ? step.value : t('settings.waitSecondsStep', { seconds: secondsOf(step.value) })}</span>
                       {invalid && <span className="text-xs text-err">{t('settings.payloadNotFound')}</span>}
@@ -483,6 +509,7 @@ export default function AutoloaderView({ onNavigate }) {
                 disabled={Boolean(conflict)}
                 className="pmgr-icon-btn flex min-w-0 items-center gap-2 rounded-lg border border-panel-border px-3 py-2 text-left transition-colors hover:border-accent/50 hover:bg-accent/10 disabled:cursor-not-allowed disabled:hover:border-panel-border disabled:hover:bg-transparent"
               >
+                <PayloadLogo repo={p.icon_repo} name={p.name} size="sm" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium text-text" dir="ltr" title={p.name}>{p.name.replace(/\.(elf|bin|self)$/i, '')}</span>
                   {conflict ? (

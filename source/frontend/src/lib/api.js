@@ -2,14 +2,15 @@
 // Plain functions, no client-state library — views manage their own loading/error state.
 
 import { cancelDirectUpload, directUploadPkg } from './pkgDirectUpload.js'
+import { localizeError } from './errors.js'
+import { translate } from './i18n.jsx'
 
 // fetch() throws a bare TypeError when the connection itself drops, not when the server
 // answers with an HTTP error — name it plainly instead of the browser's opaque "Failed to fetch".
 function isNetworkLayerError(e) {
   return e instanceof TypeError
 }
-const NETWORK_ERROR_HINT =
-  'Connection to Prospero Manager was interrupted. The app will reconnect automatically; retry this action if it did not finish.'
+const networkErrorHint = () => translate('errors.networkInterrupted')
 
 async function request(method, path, body) {
   const opts = { method, headers: {} }
@@ -28,14 +29,14 @@ async function request(method, path, body) {
         await new Promise((resolve) => window.setTimeout(resolve, 350))
         continue
       }
-      throw new Error(isNetworkLayerError(e) ? NETWORK_ERROR_HINT : e.message)
+      throw new Error(isNetworkLayerError(e) ? networkErrorHint() : e.message)
     }
   }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     // Attach the rest of the error body to the Error; callers that only read
     // .message are unaffected.
-    throw Object.assign(new Error(data.error || `${method} ${path} failed (${res.status})`), data)
+    throw Object.assign(new Error(localizeError(data.error) || translate('errors.requestFailed', { status: res.status })), data)
   }
   return data
 }
@@ -50,10 +51,10 @@ async function uploadRaw(path, file) {
       body: file,
     })
   } catch (e) {
-    throw new Error(isNetworkLayerError(e) ? NETWORK_ERROR_HINT : e.message)
+    throw new Error(isNetworkLayerError(e) ? networkErrorHint() : e.message)
   }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || 'upload failed')
+  if (!res.ok) throw new Error(localizeError(data.error) || translate('errors.uploadFailed'))
   return data
 }
 
@@ -112,7 +113,7 @@ function uploadWithProgress(path, file, onProgress, options = {}) {
           /* non-JSON error body — fall through with empty data */
         }
         if (xhr.status >= 200 && xhr.status < 300) resolve(data)
-        else reject(new Error(data.error || `upload failed (${xhr.status})`))
+        else reject(new Error(localizeError(data.error) || translate('errors.uploadFailed')))
       }
       const networkFailure = () => {
         if (attempt < retries) {
@@ -121,7 +122,7 @@ function uploadWithProgress(path, file, onProgress, options = {}) {
           window.setTimeout(run, 500 * attempt)
           return
         }
-        reject(new Error(NETWORK_ERROR_HINT))
+        reject(new Error(networkErrorHint()))
       }
       xhr.onerror = networkFailure
       xhr.ontimeout = networkFailure
@@ -185,7 +186,7 @@ function uploadResumable(path, file, onProgress, onRetry, overwrite = false, sig
             onRetry?.(attempt)
             window.setTimeout(run, 400 * attempt)
           } else {
-            abandon(new Error(NETWORK_ERROR_HINT))
+            abandon(new Error(networkErrorHint()))
           }
         }
         // A stalled connection raises no error event, so retry the chunk after a quiet spell.
@@ -209,12 +210,12 @@ function uploadResumable(path, file, onProgress, onRetry, overwrite = false, sig
             /* handled by status below */
           }
           if (xhr.status < 200 || xhr.status >= 300) {
-            abandon(new Error(data.error || `upload failed (${xhr.status})`))
+            abandon(new Error(localizeError(data.error) || translate('errors.uploadFailed')))
             return
           }
           const next = Number(data.next_offset)
           if (!Number.isFinite(next) || next <= offset || next > file.size) {
-            abandon(new Error('server returned an invalid upload checkpoint'))
+            abandon(new Error(translate('errors.invalidCheckpoint')))
             return
           }
           offset = next
@@ -277,6 +278,7 @@ export const api = {
     addSource: (url) => request('POST', '/api/catalog/sources/add', { url }),
     removeSource: (url) => request('POST', '/api/catalog/sources/remove', { url }),
     releases: (url) => request('GET', `/api/catalog/releases?url=${encodeURIComponent(url)}`),
+    iconUrl: (url) => `/api/catalog/icon?url=${encodeURIComponent(url)}`,
     refreshEntry: (url) => request('GET', `/api/catalog/refresh?url=${encodeURIComponent(url)}`),
     getGithubToken: () => request('GET', '/api/catalog/github-token'),
     setGithubToken: (token) => request('POST', '/api/catalog/github-token', { token }),
@@ -327,9 +329,9 @@ export const api = {
       try {
         res = await fetch(`/api/ftp/text?path=${encodeURIComponent(path)}`)
       } catch (e) {
-        throw new Error(isNetworkLayerError(e) ? NETWORK_ERROR_HINT : e.message)
+        throw new Error(isNetworkLayerError(e) ? networkErrorHint() : e.message)
       }
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'read failed')
+      if (!res.ok) throw new Error(localizeError((await res.json().catch(() => ({}))).error) || translate('errors.readFailed'))
       return res.json()
     },
     writeText: (path, text, metadata) => {
@@ -406,7 +408,7 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id_hex: userIdHex, title_id: titleId }),
       }).catch((e) => {
-        throw new Error(isNetworkLayerError(e) ? NETWORK_ERROR_HINT : e.message)
+        throw new Error(isNetworkLayerError(e) ? networkErrorHint() : e.message)
       }),
     getBackupConfig: () => request('GET', '/api/saves/backup-config'),
     setBackupConfig: (enabled, settleSeconds, destinations) =>
@@ -439,6 +441,7 @@ export const api = {
       .catch(() => {}),
     iconUrl: (path) => `/api/pkg/icon?path=${encodeURIComponent(path)}`,
     installed: (titleId) => request('GET', `/api/pkg/installed?title_id=${encodeURIComponent(titleId)}`),
+    installStatus: (contentId) => request('GET', `/api/pkg/install-status?content_id=${encodeURIComponent(contentId)}`),
     deleteDownload: () => request('POST', '/api/pkg/delete-download'),
     cancel: () => {
       cancelDirectUpload()

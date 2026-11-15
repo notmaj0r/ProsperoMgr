@@ -20,9 +20,8 @@ struct TitleInfo {
     std::string version;      // installed content version (e.g. "1.034.000"), empty if unknown
 };
 
-// `cfg` is only used to place the on-disk title-name cache (see titles.cpp's
-// FetchStoreTitleName).
-// With include_apps the list also holds installed apps and homebrew, marked with kind "app".
+// `cfg` places the on-disk title-name cache (see FetchStoreTitleName). With include_apps the list also
+// holds installed apps and homebrew, marked with kind "app".
 std::vector<TitleInfo> ListTitles(const Config &cfg, bool include_apps = false);
 
 // Resolves a title's icon0.png path for serving as an image response.

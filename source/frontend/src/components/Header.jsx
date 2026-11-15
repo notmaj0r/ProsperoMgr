@@ -104,7 +104,7 @@ export default function Header({ title, status, connection, onRetry, onOpenHelp,
           <span className="hidden sm:inline">{CONNECTION_LABELS[connection] || t('header.connecting')}</span>
         </button>
       )}
-      {status && <span className="hidden sm:inline-flex"><Pill tone="neutral">v{status.version}</Pill></span>}
+      {status && <span className="hidden sm:inline-flex md:hidden"><Pill tone="neutral">v{status.version}</Pill></span>}
       <UpdateBadge />
       <button
         onClick={onOpenCommand}
@@ -136,7 +136,7 @@ export default function Header({ title, status, connection, onRetry, onOpenHelp,
       <div className="flex min-w-0 items-center justify-between gap-3 sm:justify-start">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex items-center gap-2 md:hidden">
-            <img src="/icon-64.png" alt="" className="h-7 w-7 rounded-md border border-accent/40" />
+            <img src="/icon-64.png" alt="" className="h-7 w-7 rounded-lg ring-1 ring-white/10" />
           </div>
           <h1 className="truncate text-lg font-bold tracking-tight text-text">{title}</h1>
         </div>

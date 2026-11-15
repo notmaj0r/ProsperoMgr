@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Button from './Button.jsx'
+import GameCover from './GameCover.jsx'
 import { InputDialog } from './Dialog.jsx'
 import {
   CheckCircleIcon, ChevronRightIcon, CloseIcon, FileIcon, FolderIcon, GoUpIcon, NewFolderIcon,
@@ -8,7 +9,8 @@ import {
 import { api } from '../lib/api.js'
 import { useDismiss } from '../lib/useDismiss.js'
 import { useDialogAccessibility } from '../lib/useDialogAccessibility.js'
-import { volumeLabel } from '../lib/format.js'
+import { useGameFolders } from '../lib/useGameFolders.js'
+import { formatFileSize, volumeLabel } from '../lib/format.js'
 import { useI18n } from '../lib/i18n.jsx'
 import { SkeletonRows } from './Skeleton.jsx'
 
@@ -37,9 +39,10 @@ export default function PathPickerModal({
   onSelect,
   validateSelection,
 }) {
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
   const [browsePath, setBrowsePath] = useState(initialPath || '/data')
   const [entries, setEntries] = useState([])
+  const games = useGameFolders(entries, browsePath)
   const [selectedFile, setSelectedFile] = useState('')
   const [selectedFiles, setSelectedFiles] = useState(() => new Set())
   const [loading, setLoading] = useState(false)
@@ -55,7 +58,8 @@ export default function PathPickerModal({
     setLoading(true)
     setError('')
     setSelectedFile('')
-    setSelectedFiles(new Set())
+    // A multi-file pick keeps its ticks while you move between folders.
+    if (!multiple) setSelectedFiles(new Set())
     api.ftp.list(nextPath)
       .then((result) => {
         const visible = (result.entries || []).filter((item) => {
@@ -77,6 +81,20 @@ export default function PathPickerModal({
   const multiFile = multiple && mode === 'file'
   const selection = mode === 'file' ? selectedFile : browsePath
   const validationError = !multiFile && selection && validateSelection ? validateSelection(selection) : ''
+
+  // The files in this folder, and whether every one of them is ticked.
+  const folderFiles = entries.filter((item) => !item.is_dir).map((item) => joinPath(browsePath, item.name))
+  const allHereSelected = folderFiles.length > 0 && folderFiles.every((file) => selectedFiles.has(file))
+  const toggleAllHere = () => {
+    setSelectedFiles((prev) => {
+      const next = new Set(prev)
+      for (const file of folderFiles) {
+        if (allHereSelected) next.delete(file)
+        else next.add(file)
+      }
+      return next
+    })
+  }
 
   const toggleFile = (fullPath) => {
     setSelectedFiles((prev) => {
@@ -146,7 +164,13 @@ export default function PathPickerModal({
 
           <div className="mb-2 flex items-center justify-between gap-2">
             <Button size="sm" tone="neutral" icon={<GoUpIcon size={14} />} disabled={browsePath === '/'} onClick={() => browse(browsePath.replace(/\/[^/]+\/?$/, '') || '/')}>{t('files.up')}</Button>
-            <Button size="sm" tone="neutral" icon={<NewFolderIcon size={14} />} onClick={() => setNewFolderOpen(true)}>{t('files.newFolder')}</Button>
+            {multiFile ? (
+              <Button size="sm" tone="neutral" icon={<CheckCircleIcon size={14} />} disabled={folderFiles.length === 0} onClick={toggleAllHere}>
+                {allHereSelected ? t('common.clearSelection') : `${t('common.selectAll')} (${folderFiles.length})`}
+              </Button>
+            ) : (
+              <Button size="sm" tone="neutral" icon={<NewFolderIcon size={14} />} onClick={() => setNewFolderOpen(true)}>{t('files.newFolder')}</Button>
+            )}
           </div>
 
           {error && <div className="mb-2 rounded-lg border border-err/25 bg-err/10 px-3 py-2 text-xs text-err">{error}</div>}
@@ -158,6 +182,7 @@ export default function PathPickerModal({
             ) : entries.map((entry, index) => {
               const fullPath = joinPath(browsePath, entry.name)
               const selected = multiFile ? selectedFiles.has(fullPath) : selectedFile === fullPath
+              const game = entry.is_dir ? games[fullPath] : null
               return (
                 <button
                   type="button"
@@ -172,7 +197,7 @@ export default function PathPickerModal({
                     setSelectedFile(fullPath)
                     Promise.resolve(onSelect(fullPath)).catch((e) => setError(e.message))
                   }}
-                  className={`pmgr-row-in flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors ${selected ? 'bg-accent/15 text-accent' : 'text-text hover:bg-panel-border'}`}
+                  className={`pmgr-row-in pmgr-path-picker-row flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors ${selected ? 'bg-accent/15 text-accent' : 'text-text hover:bg-panel-border'}`}
                   style={{ '--ti': index }}
                 >
                   {multiFile && !entry.is_dir && (
@@ -180,9 +205,18 @@ export default function PathPickerModal({
                       ? <CheckCircleIcon size={18} className="shrink-0 text-accent" />
                       : <span className="h-[18px] w-[18px] shrink-0 rounded-full border border-panel-border" />
                   )}
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent">{entry.is_dir ? <FolderIcon size={18} /> : <FileIcon size={17} />}</span>
-                  <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
-                  {entry.is_dir && <ChevronRightIcon size={15} />}
+                  {game
+                    ? <GameCover game={game} small />
+                    : <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent">{entry.is_dir ? <FolderIcon size={18} /> : <FileIcon size={17} />}</span>}
+                  {game ? (
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">{game.name}</span>
+                      <span className="pmgr-mono block truncate text-xs text-text-dim" dir="ltr">{game.title_id} · {entry.name}</span>
+                    </span>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
+                  )}
+                  {entry.is_dir ? <ChevronRightIcon size={15} /> : <span className="pmgr-num shrink-0 text-xs text-text-dim">{formatFileSize(entry.size, locale)}</span>}
                 </button>
               )
             })}

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { SettingsSection } from './SettingsKit.jsx'
 import Button from './Button.jsx'
+import PayloadLogo from './PayloadLogo.jsx'
 import { CheckIcon, CloseIcon, AlertTriangleIcon } from './icons.jsx'
 import { useI18n } from '../lib/i18n.jsx'
 import { formatFileSize } from '../lib/format.js'
@@ -45,16 +46,21 @@ function Step({ name, info, state, duration, last, locale, t }) {
         {!last && <span className={`my-1 w-0.5 flex-1 rounded-full transition-colors duration-500 ${state === 'done' ? 'bg-ok/60' : 'bg-panel-border'}`} style={{ minHeight: '1.25rem' }} />}
       </div>
       <div className={`mb-2 min-w-0 flex-1 rounded-xl border px-3.5 py-2.5 transition-colors duration-300 ${state === 'active' ? 'border-info/40 bg-info/5' : 'border-transparent'}`}>
-        <div className="flex items-center justify-between">
-          <span className={`min-w-0 truncate text-base font-bold ${state === 'pending' ? 'text-text-dim' : 'text-text'}`}>{shortName(name)}</span>
-          <span className={`ml-3 shrink-0 text-sm font-semibold ${statusTone}`}>{status}</span>
-        </div>
-        {meta.length > 0 && (
-          <div className="mt-0.5 truncate text-xs text-text-dim">
-            {meta.map((part, i) => <span key={i}>{i > 0 && ' · '}{i === 0 && info?.version ? <span className="pmgr-mono" dir="ltr">{part}</span> : part}</span>)}
+        <div className="flex items-start">
+          <PayloadLogo repo={info?.iconRepo} name={shortName(name)} size="md" dim={state === 'pending'} className="mr-3" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between">
+              <span className={`min-w-0 truncate text-base font-bold ${state === 'pending' ? 'text-text-dim' : 'text-text'}`}>{shortName(name)}</span>
+              <span className={`ml-3 shrink-0 text-sm font-semibold ${statusTone}`}>{status}</span>
+            </div>
+            {meta.length > 0 && (
+              <div className="mt-0.5 truncate text-xs text-text-dim">
+                {meta.map((part, i) => <span key={i}>{i > 0 && ' · '}{i === 0 && info?.version ? <span className="pmgr-mono" dir="ltr">{part}</span> : part}</span>)}
+              </div>
+            )}
+            {state === 'active' && <div className="pmgr-indeterminate mt-2 h-1 rounded-full bg-info/15" />}
           </div>
-        )}
-        {state === 'active' && <div className="pmgr-indeterminate mt-2 h-1 rounded-full bg-info/15" />}
+        </div>
       </div>
     </li>
   )

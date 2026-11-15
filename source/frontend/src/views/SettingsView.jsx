@@ -22,6 +22,7 @@ import { api } from '../lib/api.js'
 import { JOBS_AUTOCLEAR_KEY, JOBS_AUTOCLEAR_OPTIONS, loadJobsAutoClear } from '../lib/jobsAutoClear.js'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useI18n } from '../lib/i18n.jsx'
+import { localizeError } from '../lib/errors.js'
 import { usePolling } from '../lib/usePolling.js'
 import { formatFileSize, volumeLabel} from '../lib/format.js'
 import { SkeletonRows } from '../components/Skeleton.jsx'
@@ -475,7 +476,7 @@ function GeneralTab() {
         <MetricTile label={t('settings.metricConsole')} value={system?.platform} loading={loading} />
         <MetricTile label={t('settings.metricFirmware')} value={system?.firmware} loading={loading} />
         <MetricTile label={t('settings.metricCurrentUser')} value={system?.user_name || t('common.unknown')} loading={loading} />
-        <MetricTile label={t('settings.metricIpAddress')} value={system?.ip_address} loading={loading} />
+        <MetricTile label={t('settings.metricIpAddress')} value={system ? system.ip_address || t('common.unavailable') : undefined} loading={loading} />
       </div>
 
       {system?.storage?.length > 0 && (
@@ -773,6 +774,9 @@ function AccountsPanel() {
                         <p>{t('settings.accountIdHelpFormat')}</p>
                       </div>
                     </details>
+                    {idSource !== 'existing' && (
+                      <p className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">{t('settings.accountIdSavesWarning')}</p>
+                    )}
                     <p className="text-xs text-text-dim">{t('settings.backupNoticeBeforeChange')}</p>
                     {mode === 'signin' ? (
                       <Button tone="primary" onClick={signIn} disabled={busy || !accountId.trim()}>
@@ -1021,7 +1025,7 @@ function UpdatesSection() {
   const summary = !status ? '…'
     : status.state === 'checking' ? t('update.checking')
     : status.available ? t('update.newVersion', { version: status.latest })
-    : status.error ? status.error
+    : status.error ? localizeError(status.error)
     : status.latest ? t('update.upToDate', { current: status.current })
     : t('update.notChecked', { current: status.current })
 

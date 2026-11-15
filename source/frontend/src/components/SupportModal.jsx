@@ -17,7 +17,7 @@ const CRYPTO = [
   { label: 'USDT (TON)', addr: 'UQA18f4cVS0778fL_nIssdN1GIHRYR7dQ3UnNgjPwgYvIQi_' },
 ]
 
-const SUPPORTERS = ['Vinas', 'Someone', 'Bruno Sanglard', 'AirKingBR', 'Marcus', 'Jeffs', 'cavalcanti27', 'Maffioh', 'PCYGOR', 'Lucas Clinio Maraia', 'primo', 'lal3x', 'jawad', 'anonymous', 'X-F1REBALL-X', 'Br0ken4life', 'Nimrod', 'I gave a tip!', 'johnfugate', 'Loxias', 'Shambhala222', 'Zahir Tarafder', 'Wender', 'Heymimd', 'Android_Loads', 'LOCATELLI', 'Tiago G DE LIRA', 'Giih77777', 'mvlira', 'PauloSantos', 'Waleed', 'Doubleq', 'gas17', 'PS5FOREVA', 'thiagodalsoto', 'Thiago_Dark', 'Jeffeerson REC']
+const SUPPORTERS = ['Vinas', 'Someone', 'Bruno Sanglard', 'AirKingBR', 'Marcus', 'Jeffs', 'cavalcanti27', 'Maffioh', 'PCYGOR', 'Lucas Clinio Maraia', 'primo', 'lal3x', 'jawad', 'anonymous', 'X-F1REBALL-X', 'Br0ken4life', 'Nimrod', 'I gave a tip!', 'johnfugate', 'Loxias', 'Shambhala222', 'Zahir Tarafder', 'Wender', 'Heymimd', 'Android_Loads', 'LOCATELLI', 'Tiago G DE LIRA', 'Giih77777', 'mvlira', 'PauloSantos', 'Waleed', 'Doubleq', 'gas17', 'PS5FOREVA', 'thiagodalsoto', 'Thiago_Dark', 'Jeffeerson REC', 'Brian Mecky', 'tabu', 'Thiago', 'jpemendonca', 'Ffcrocha97', 'er1ck', 'JOTINHA', 'pepe', 'MG']
 
 export default function SupportModal({ onClose }) {
   const { t } = useI18n()

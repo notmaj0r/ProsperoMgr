@@ -1,5 +1,7 @@
 // Clipboard.writeText is restricted to secure contexts in several browsers, including the
 // PS5 browser. Keep the modern path, then fall back to the selection API for plain HTTP origins.
+import { translate } from './i18n.jsx'
+
 export async function copyText(text) {
   if (navigator.clipboard?.writeText) {
     try {
@@ -27,5 +29,5 @@ export async function copyText(text) {
   } finally {
     document.body.removeChild(field)
   }
-  if (!copied) throw new Error('clipboard copy was rejected')
+  if (!copied) throw new Error(translate('errors.clipboardRejected'))
 }

@@ -255,6 +255,8 @@ A release can be downloaded straight into the payload library from an entry. Not
 
 Prospero ships with a curated list of PS5 homebrew projects and groups them by developer.
 
+Entries show the project's logo when it has one: from the Payload Manager mirror if it lists the project, otherwise from an icon file in the repository itself (such as `sce_sys/icon0.png` or `assets/icon0.png`). Logos are fetched the first time the page is opened and kept in `repo_icons` under the Prospero folder, so they still show without internet. A logo is looked up again after two weeks.
+
 For supported GitHub/Gitea repositories, Prospero checks the upstream releases API and displays the newest non-draft, non-prerelease tag when available.
 
 Each entry provides an **Open** action that takes you directly to the project's real upstream repository, and a **Download** action to pick a release.

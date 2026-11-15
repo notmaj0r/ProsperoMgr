@@ -31,7 +31,7 @@ class HttpsClient {
     // Buffers the whole body in memory — fine for repo index JSON. `out->status` is
     // set even when this fails, so callers can tell an HTTP 404 from a dead transport.
     static bool Get(const std::string &url, HttpsResponse *out, std::string *err, NetErrorKind *kind = nullptr,
-                    const std::string &bearer_token = "");
+                    const std::string &bearer_token = "", bool quiet = false); // quiet: keep a 404 out of the log.
 
     // Streams the body to a local file with a stall timeout, unlike Get() —
     // always prefer this over buffering a download in memory.

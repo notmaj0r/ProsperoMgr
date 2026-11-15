@@ -25,6 +25,8 @@
 #include "json_writer.hpp"
 #include "file_jobs.hpp"
 #include "log.hpp"
+#include "notify.hpp"
+#include "notify_text.hpp"
 
 namespace prospero {
 
@@ -880,6 +882,11 @@ void HttpServer::WatchdogLoop() {
                                      current.empty() ? "offline mode" : "IP address change";
                 LogEvent(std::string("HTTP listener refresh requested for ") + reason);
                 last_ip_ = std::move(current);
+                // The page moves to the new address, so tell the user where it is now.
+                if (!last_ip_.empty()) {
+                    NotifyDebug("Prospero Manager:\n" +
+                                NotifyText(Msg::kListening, {{"address", "http://" + last_ip_ + ":" + std::to_string(port_)}}));
+                }
                 restart_requested_ = true;
                 probe_ticks = 0;
                 continue;

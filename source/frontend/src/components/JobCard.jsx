@@ -3,7 +3,7 @@ import Pill from './Pill.jsx'
 import { CheckCircleIcon, XCircleIcon } from './icons.jsx'
 
 export const KIND_KEYS = { base: 'pkg.kindBase', update: 'pkg.kindUpdate', dlc: 'pkg.kindDlc' }
-export const KIND_TONES = { update: 'info', dlc: 'warn' }
+export const KIND_TONES = { base: 'accent', update: 'info', dlc: 'warn' }
 
 // The live card: which package, which step, how far along, and how fast. A real percentage only
 // where bytes are counted; steps with nothing to measure (the PS5's own validation) sweep instead.

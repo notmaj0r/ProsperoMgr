@@ -19,6 +19,7 @@ import { formatDate, formatFileSize, volumeLabel, volumeBarClass } from '../lib/
 import { useDebouncedValue } from '../lib/useDebouncedValue.js'
 import { usePolling } from '../lib/usePolling.js'
 import { isPS5 } from '../lib/effects.js'
+import { isPayloadLikeProcessName } from '../lib/processes.js'
 
 // Word order/punctuation around a name differs by language, so the caller
 // picks a plain vs. a "WithName" key instead of concatenating "greeting, name".
@@ -72,10 +73,6 @@ const TILE_PAGE = isPS5() ? 24 : 60
 // As many columns as fit, so the covers stay large and the rows stay full.
 const GAMES_GRID = { gridTemplateColumns: `repeat(auto-fill, minmax(${isPS5() ? 250 : 220}px, 1fr))` }
 const isLoopbackHost = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
-
-function stemOf(name) {
-  return name.replace(/\.(elf|bin|self)$/i, '').toLowerCase()
-}
 
 function PanelTile({ label, value, sub, bar, barClass, onClick, valueClass = 'text-text' }) {
   const body = (
@@ -333,16 +330,17 @@ export default function HomeView({ status, connection, onNavigate }) {
 
   // Poll only while the tab is visible; system info and payload counts change slowly.
   usePolling(() => {
-    Promise.allSettled([api.thermal.status(), api.autoloader.status(), api.system.info(), api.payloads.list(), api.processes.list()]).then(
-      ([thermal, autoloader, info, payloads, processes]) => {
+    Promise.allSettled([api.thermal.status(), api.autoloader.status(), api.system.info(), api.processes.list()]).then(
+      ([thermal, autoloader, info, processes]) => {
         setOverview({
           thermal: thermal.status === 'fulfilled' ? thermal.value : null,
           autoloader: autoloader.status === 'fulfilled' ? autoloader.value : null,
         })
         if (info.status === 'fulfilled') setSystem(info.value)
-        if (payloads.status === 'fulfilled' && processes.status === 'fulfilled') {
-          const running = new Set((processes.value.processes || []).map((p) => stemOf(p.name || '')))
-          setPayloadsRunning(payloads.value.payloads.filter((p) => running.has(stemOf(p.name))).length)
+        // Counted from the processes themselves, so a payload started by any loader or manager shows up,
+        // whatever its file is called in the library.
+        if (processes.status === 'fulfilled') {
+          setPayloadsRunning((processes.value.processes || []).filter((p) => isPayloadLikeProcessName(p.name || '')).length)
         }
       },
     )

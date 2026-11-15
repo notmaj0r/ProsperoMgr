@@ -5,6 +5,7 @@ import { DownloadIcon } from './icons.jsx'
 import { api } from '../lib/api.js'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useI18n } from '../lib/i18n.jsx'
+import { localizeError } from '../lib/errors.js'
 
 export default function UpdateDialog({ status, refresh, onClose }) {
   const { t, locale } = useI18n()
@@ -41,7 +42,7 @@ export default function UpdateDialog({ status, refresh, onClose }) {
             sub={downloading && status.total > 0 ? `${formatSize(status.loaded, locale)} / ${formatSize(status.total, locale)}` : undefined}
           />
         )}
-        {status.error && <div className="rounded-lg border border-err/25 bg-err/10 px-3 py-2 text-xs text-err">{status.error}</div>}
+        {status.error && <div className="rounded-lg border border-err/25 bg-err/10 px-3 py-2 text-xs text-err">{localizeError(status.error)}</div>}
         {status.notes && (
           <div>
             <div className="mb-1.5 text-xs font-bold uppercase tracking-wide text-text-dim">{t('update.notes')}</div>

@@ -4,7 +4,7 @@ import DropZone from '../components/DropZone.jsx'
 import Button from '../components/Button.jsx'
 import PathPickerModal from '../components/PathPickerModal.jsx'
 import { ConfirmDialog } from '../components/Dialog.jsx'
-import { CheckCircleIcon, ClockIcon, CloseIcon, DeleteIcon, FileIcon, FolderIcon, InstallIcon, RefreshIcon, UploadIcon, ExternalIcon, XCircleIcon } from '../components/icons.jsx'
+import { CheckCircleIcon, ChevronRightIcon, ClockIcon, CloseIcon, DeleteIcon, FileIcon, FolderIcon, InstallIcon, RefreshIcon, UploadIcon, XCircleIcon } from '../components/icons.jsx'
 import Pill from '../components/Pill.jsx'
 import JobCard, { KIND_KEYS, KIND_TONES } from '../components/JobCard.jsx'
 import { formatSize, formatSpeed, formatEta } from '../components/TransferProgress.jsx'
@@ -16,6 +16,7 @@ import { isPS5 } from '../lib/effects.js'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useHistoryState } from '../lib/useHistoryState.js'
 import { useI18n } from '../lib/i18n.jsx'
+import { localizeError } from '../lib/errors.js'
 
 const ON_PS5 = isPS5()
 const METHODS = [
@@ -28,10 +29,14 @@ const METHOD_ORDER = ON_PS5 ? [METHODS[2], METHODS[1], METHODS[0]] : METHODS
 
 // Queue-row phase -> label. "finishing" is the PS5 still reading the package after
 // "queued", not a stall — see pkg_live_cache.hpp's done callback.
-const PHASE_LABEL_KEYS = { uploading: 'pkg.stepUploading', validating: 'pkg.stepValidating', finishing: 'pkg.stepFinishing' }
+const PHASE_LABEL_KEYS = { uploading: 'pkg.stepUploading', validating: 'pkg.stepValidating', finishing: 'pkg.stepFinishing', waitingBase: 'pkg.stepWaitingBase' }
 
 // Pause between queued installs, so the next one does not start while the console is still busy.
 const SETTLE_MS = 5000
+// An update or DLC waits for its base game to finish installing on the console; the console is asked this often.
+const BASE_POLL_MS = 3000
+const BASE_WAIT_MAX_MS = 90 * 60 * 1000
+const BASE_SILENT_POLLS = 20 // about a minute without an answer from the installer
 const HISTORY_KEY = 'pmgr-pkg-history'
 const HISTORY_MAX = 8
 
@@ -99,11 +104,11 @@ function groupStage(items) {
 }
 
 // Cover art with fallbacks: the package's own icon first, then the installed game's.
-function Cover({ sources, small = false }) {
+function Cover({ sources, small = false, large = false }) {
   const [failed, setFailed] = useState(0)
   const src = sources[failed]
   return (
-    <span className={`grid shrink-0 place-items-center overflow-hidden rounded-lg bg-panel-2 text-text-dim ${small ? 'h-9 w-9' : 'h-12 w-12'}`}>
+    <span className={`grid shrink-0 place-items-center overflow-hidden ${large ? 'rounded-xl' : 'rounded-lg'} bg-panel-2 text-text-dim ${small ? 'h-9 w-9' : large ? 'h-16 w-16' : 'h-12 w-12'}`}>
       {src ? <img src={src} alt="" className="h-full w-full object-cover" onError={() => setFailed((n) => n + 1)} /> : <FileIcon size={18} />}
     </span>
   )
@@ -123,61 +128,83 @@ function StageCard({ groups, volumes, busy, onRemove, onClear, onStart, t, local
   const usedPct = internal?.total > 0 ? ((internal.total - internal.free) / internal.total) * 100 : 0
   const neededPct = internal?.total > 0 ? Math.min(100 - usedPct, (needed / internal.total) * 100) : 0
 
+  const multi = groups.some((g) => g.items.length > 1)
+
   return (
     <div className="mb-4 rounded-2xl border border-accent/25 bg-accent/5 p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-bold text-text">{t('pkg.reviewTitle')} · {items.length}</div>
+        <div>
+          <div className="text-base font-bold text-text">{t('pkg.reviewTitle')} · {items.length}</div>
+          {multi && <p className="mt-0.5 text-xs text-text-dim">{t('pkg.orderHint')}</p>}
+        </div>
         <Button size="sm" tone="ghost" onClick={onClear} disabled={busy}>{t('pkg.clearList')}</Button>
       </div>
 
-      <div className="flex flex-col gap-2">
-        {groups.map((group) => (
-          <div key={group.key} className="pmgr-row-in rounded-xl border border-panel-border bg-panel p-2.5">
-            <div className="flex items-center gap-3">
-              <Cover key={group.icons.join('|')} sources={group.icons} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-bold text-text" dir="ltr">{group.name}</div>
-                {group.titleId && <div className="pmgr-mono text-xs text-text-dim" dir="ltr">{group.titleId}</div>}
+      <div className="flex flex-col gap-3">
+        {groups.map((group) => {
+          const groupSize = group.items.reduce((sum, it) => sum + (it.size || 0), 0)
+          // A "base game missing" warning does not apply when the base game is in this same list.
+          const baseInList = group.items.some((it) => it.info?.category === 'base')
+          return (
+            <div key={group.key} className="pmgr-row-in rounded-xl border border-panel-border bg-panel p-3">
+              <div className="flex items-center">
+                <span className="mr-4"><Cover key={group.icons.join('|')} sources={group.icons} large /></span>
+                <div className="min-w-0 flex-1">
+                  <div className="line-clamp-2 text-base font-bold leading-tight text-text" dir="ltr">{group.name}</div>
+                  <div className="mt-1.5 flex flex-wrap items-center text-xs text-text-dim">
+                    {group.titleId && <span className="pmgr-mono mr-3 rounded-md bg-panel-2 px-2 py-0.5 font-semibold text-text" dir="ltr">{group.titleId}</span>}
+                    <span className="mr-3">{t('pkg.packagesCount', { count: group.items.length })}</span>
+                    {groupSize > 0 && <span className="pmgr-num">{formatSize(groupSize, locale)}</span>}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-col border-t border-panel-border pt-2">
+                {group.items.map((item, position) => {
+                  const info = item.info
+                  return (
+                    <div key={item.id} className="flex items-start py-1.5">
+                      {group.items.length > 1 && (
+                        <span className="mr-3 mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full bg-panel-2 text-[11px] font-bold text-text-dim">{position + 1}</span>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center">
+                          <span className="mr-3"><Pill tone={KIND_TONES[info?.category] || 'neutral'}>{info?.category ? t(KIND_KEYS[info.category]) : t('pkg.kindUnknown')}</Pill></span>
+                          {!info && <span className="mr-3 text-xs text-text-dim">{t('pkg.reading')}</span>}
+                          {info?.version && <span className="pmgr-mono mr-3 text-sm font-semibold text-text" dir="ltr">{t('pkg.versionLabel', { version: info.version })}</span>}
+                          {item.size > 0 && <span className="pmgr-num text-sm text-text-dim">{formatSize(item.size, locale)}</span>}
+                        </div>
+                        <div className="pmgr-mono mt-1 truncate text-xs text-text-dim" dir="ltr" title={item.name}>{item.name}</div>
+                        {item.warning && !(baseInList && item.warning.key === 'pkg.warnBaseMissing') && (
+                          <div className="mt-1.5 rounded-lg bg-warn/10 px-2.5 py-1.5 text-xs font-semibold text-warn">{t(item.warning.key, { version: item.warning.version })}</div>
+                        )}
+                      </div>
+                      <Button size="icon" tone="danger" title={t('pkg.remove')} onClick={() => onRemove(item.id)}>
+                        <CloseIcon size={14} />
+                      </Button>
+                    </div>
+                  )
+                })}
               </div>
             </div>
-            <div className="mt-2 flex flex-col gap-1 border-t border-panel-border pt-2">
-              {group.items.map((item) => {
-                const info = item.info
-                return (
-                  <div key={item.id} className="flex items-center gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-text-dim">
-                        <Pill tone={KIND_TONES[info?.category] || 'neutral'}>{info?.category ? t(KIND_KEYS[info.category]) : t('pkg.kindUnknown')}</Pill>
-                        {!info && <span>{t('pkg.reading')}</span>}
-                        {info?.version && <span>{t('pkg.versionLabel', { version: info.version })}</span>}
-                        {item.size > 0 && <span className="pmgr-num">{formatSize(item.size, locale)}</span>}
-                        {!group.titleId || !info?.titleName ? <span className="truncate" dir="ltr">{item.name}</span> : null}
-                      </div>
-                      {item.warning && <div className="mt-1 text-xs font-semibold text-warn">{t(item.warning.key, { version: item.warning.version })}</div>}
-                    </div>
-                    <Button size="icon" tone="danger" title={t('pkg.remove')} onClick={() => onRemove(item.id)}>
-                      <CloseIcon size={14} />
-                    </Button>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       {internal && needed > 0 && (
         <div className="mt-3 rounded-xl border border-panel-border bg-bg/40 p-3">
-          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-            <span className="font-bold text-text">{t('pkg.spaceTitle')}</span>
-            <span className="text-text-dim">{t('pkg.spaceNeeded', { size: formatSize(needed, locale) })} · {t('pkg.spaceFree', { size: formatSize(free, locale) })}</span>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span className="text-sm font-bold text-text">{t('pkg.spaceTitle')}</span>
+            <span className="text-text-dim">{t('pkg.spaceFree', { size: formatSize(free, locale) })}</span>
           </div>
-          <div className="flex h-2 overflow-hidden rounded-full bg-panel-border">
+          <div className="flex h-2.5 overflow-hidden rounded-full bg-panel-border">
             <div className="h-full bg-text-dim/50" style={{ width: `${usedPct}%` }} />
             <div className={`h-full ${short > 0 ? 'bg-err' : 'bg-accent'}`} style={{ width: `${neededPct}%`, minWidth: 4 }} />
           </div>
-          <div className={`mt-1.5 text-xs ${short > 0 ? 'font-semibold text-err' : 'text-text-dim'}`}>
-            {short > 0 ? t('pkg.spaceShort', { size: formatSize(short, locale) }) : t('pkg.spaceAfter', { size: formatSize(free - needed, locale) })}
+          <div className="mt-2 flex flex-wrap items-center justify-between text-xs">
+            <span className="font-semibold text-text">{t('pkg.spaceNeeded', { size: formatSize(needed, locale) })}</span>
+            <span className={short > 0 ? 'font-semibold text-err' : 'text-text-dim'}>
+              {short > 0 ? t('pkg.spaceShort', { size: formatSize(short, locale) }) : t('pkg.spaceAfter', { size: formatSize(free - needed, locale) })}
+            </span>
           </div>
         </div>
       )}
@@ -197,10 +224,9 @@ export default function PkgView({ visible = true }) {
   const [method, setMethodStep] = useHistoryState('pkgMethod', ON_PS5 ? 'console' : 'device', '#/pkg')
   const setMethod = (next, replace = false) => { if (next !== method) setMethodStep(next, replace) }
   const [url, setUrl] = useState('')
-  const [path, setPath] = useState('')
   const [volumes, setVolumes] = useState([])
   const [pathPickerOpen, setPathPickerOpen] = useState(false)
-  const [pathPickerMulti, setPathPickerMulti] = useState(false)
+  const [pickerDir, setPickerDir] = useState('') // the folder the picker opens in, the last one used
   const [busy, setBusy] = useState(false)
   const [uploadJob, setUploadJob] = useState(null) // browser -> backend leg, upload flow only
   const [job, setJob] = useState(null) // backend job status (download/install)
@@ -253,7 +279,7 @@ export default function PkgView({ visible = true }) {
       setResult({ ok: true, content_id: s.content_id, title: s.title, hasStagedFile: s.has_staged_file })
       showToast(t('pkg.installQueuedToast', { contentId: s.title || s.content_id || t('pkg.packageAcceptedByPs5') }))
     } else {
-      const error = s.error === 'canceled' ? t('pkg.canceled') : s.error
+      const error = s.error === 'canceled' ? t('pkg.canceled') : localizeError(s.error)
       setResult({ ok: false, error })
       showToast(error, 'err')
     }
@@ -310,16 +336,65 @@ export default function PkgView({ visible = true }) {
 
   const updateQueueItem = (id, patch) => setQueue((q) => q.map((it) => (it.id === id ? { ...it, ...patch } : it)))
 
+  // Resolves 'done' once the console reports the base game installed, 'failed' if it errors or never answers.
+  const waitForBaseInstalled = async (contentId, titleId) => {
+    const started = Date.now()
+    let silent = 0
+    while (!canceledRef.current && Date.now() - started < BASE_WAIT_MAX_MS) {
+      try {
+        const s = await api.pkg.installStatus(contentId)
+        if (s.failed) return 'failed'
+        if (s.finished) return 'done'
+        silent = s.known ? 0 : silent + 1
+      } catch {
+        silent += 1
+      }
+      if (silent >= BASE_SILENT_POLLS) {
+        // The installer is not answering, so go by whether the game is on the console.
+        const found = await api.pkg.installed(titleId).catch(() => null)
+        return found?.installed ? 'done' : 'failed'
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, BASE_POLL_MS))
+    }
+    return canceledRef.current ? 'canceled' : 'failed'
+  }
+
   // Installs each queued item in order — the backend only ever runs one install job at
   // a time anyway, so this just waits for each to fully finish before starting the next.
   const runQueue = async (items) => {
     canceledRef.current = false
+    const outcomes = new Map() // item id -> 'done' | 'error', so an update can tell if its base made it
     for (const [index, item] of items.entries()) {
       // The console is still finalizing the previous package right after it reports done.
       if (index > 0) await new Promise((resolve) => window.setTimeout(resolve, SETTLE_MS))
       if (canceledRef.current) {
         updateQueueItem(item.id, { status: 'error', error: t('pkg.canceled') })
         continue
+      }
+      // Updates and DLC go in after their base game has really finished installing, and are skipped if it did not.
+      const category = item.info?.category
+      const titleId = item.info?.titleId
+      if ((category === 'update' || category === 'dlc') && titleId) {
+        const base = items.slice(0, index).find((it) => it.info?.titleId === titleId && it.info?.category === 'base')
+        let skipped = ''
+        if (base) {
+          if (outcomes.get(base.id) !== 'done') {
+            skipped = t('pkg.skippedBaseFailed')
+          } else {
+            updateQueueItem(item.id, { status: 'active', phase: 'waitingBase' })
+            const waited = await waitForBaseInstalled(base.info.contentId, titleId)
+            if (waited === 'canceled') skipped = t('pkg.canceled')
+            else if (waited !== 'done') skipped = t('pkg.skippedBaseFailed')
+          }
+        } else if (category === 'update') {
+          const found = await api.pkg.installed(titleId).catch(() => null)
+          if (found && !found.installed) skipped = t('pkg.skippedBaseMissing')
+        }
+        if (skipped) {
+          outcomes.set(item.id, 'error')
+          updateQueueItem(item.id, { status: 'error', error: skipped })
+          continue
+        }
       }
       updateQueueItem(item.id, { status: 'active', phase: item.kind === 'device' ? 'uploading' : 'validating' })
       setResult(null)
@@ -354,14 +429,16 @@ export default function PkgView({ visible = true }) {
           updateQueueItem(item.id, { phase: 'finishing' })
           await waitForDirectUploadIdle()
         }
-        if (status.phase === 'error') throw new Error(status.error)
+        if (status.phase === 'error') throw new Error(localizeError(status.error))
+        outcomes.set(item.id, 'done')
         updateQueueItem(item.id, { status: 'done' })
         recordHistory(item, true)
         reportJobResult(status)
       } catch (e) {
         // A console that rejects the package closes the upload socket; its own message says why.
         const failed = e.message === 'canceled' ? null : await api.pkg.status().catch(() => null)
-        const error = e.message === 'canceled' ? t('pkg.canceled') : failed?.phase === 'error' && failed.error ? failed.error : e.message
+        const error = e.message === 'canceled' ? t('pkg.canceled') : failed?.phase === 'error' && failed.error ? localizeError(failed.error) : e.message
+        outcomes.set(item.id, 'error')
         updateQueueItem(item.id, { status: 'error', error })
         recordHistory(item, false, error)
         showToast(error, 'err')
@@ -501,6 +578,10 @@ export default function PkgView({ visible = true }) {
   } else if (job?.phase === 'installing') {
     hero = (
       <JobCard {...heroBase} steps={stepList} activeIndex={1} label={t('pkg.validatingAndQueuing')} indeterminate sub={t('pkg.validatingSub')} />
+    )
+  } else if (activeItem?.phase === 'waitingBase') {
+    hero = (
+      <JobCard {...heroBase} steps={stepList} activeIndex={0} label={t('pkg.stepWaitingBase')} indeterminate sub={t('pkg.waitingBaseSub')} />
     )
   } else if (activeItem?.phase === 'finishing') {
     hero = (
@@ -679,30 +760,20 @@ export default function PkgView({ visible = true }) {
 
         {method === 'console' && (
           <div className="rounded-xl border border-panel-border bg-bg/40 p-4">
-            <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-text-dim">{t('pkg.consoleLabel')}</label>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <button
-                type="button"
-                onClick={() => { setPathPickerMulti(false); setPathPickerOpen(true) }}
-                className="flex min-w-0 flex-1 items-center gap-3 rounded-lg border border-panel-border bg-bg px-3 py-2 text-left text-sm transition-colors hover:border-accent/40"
-              >
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent/10 text-accent">{path ? <FileIcon size={16} /> : <FolderIcon size={16} />}</span>
-                <span className={`min-w-0 flex-1 truncate font-mono text-xs ${path ? 'text-text' : 'text-text-dim'}`} dir="ltr">{path || t('pkg.browsePlaceholder')}</span>
-                <span className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-accent">{t('pkg.browse')} <ExternalIcon size={12} /></span>
-              </button>
-              <Button tone="neutral" icon={<InstallIcon size={15} />} onClick={() => { stageConsolePaths([path.trim()]); setPath('') }} disabled={busy || !path.trim()}>
-                {t('pkg.review')}
-              </Button>
-            </div>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-text-dim">{t('pkg.consoleLabel')}</label>
             <button
               type="button"
-              onClick={() => { setPathPickerMulti(true); setPathPickerOpen(true) }}
+              onClick={() => setPathPickerOpen(true)}
               disabled={busy}
-              className="mt-2 text-xs font-semibold text-accent hover:underline disabled:opacity-50 disabled:hover:no-underline"
+              className="flex w-full items-center rounded-xl border border-dashed border-panel-border bg-bg px-4 py-5 text-left transition-colors hover:border-accent/50 hover:bg-accent/5 disabled:opacity-50"
             >
-              {t('pkg.selectMultiple')}
+              <span className="mr-4 grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"><FolderIcon size={22} /></span>
+              <span className="min-w-0 flex-1">
+                <span className="block font-bold text-text">{t('pkg.chooseFiles')}</span>
+                <span className="mt-0.5 block text-xs text-text-dim">{t('pkg.consoleHint')}</span>
+              </span>
+              <span className="ml-3 shrink-0 text-accent"><ChevronRightIcon size={18} /></span>
             </button>
-            <p className="mt-1.5 text-xs text-text-dim">{t('pkg.consoleHint')}</p>
           </div>
         )}
       </DropZone>
@@ -729,18 +800,18 @@ export default function PkgView({ visible = true }) {
 
       {pathPickerOpen && (
         <PathPickerModal
-          title={pathPickerMulti ? t('pkg.pathPickerMultiTitle') : t('pkg.pathPickerTitle')}
-          description={t('pkg.pathPickerDesc')}
-          initialPath={path ? path.replace(/\/[^/]+$/, '') || '/' : '/data'}
+          title={t('pkg.pathPickerMultiTitle')}
+          description={t('pkg.pathPickerMultiDesc')}
+          initialPath={pickerDir || '/data'}
           volumes={volumes}
           mode="file"
-          multiple={pathPickerMulti}
+          multiple
           extensions={['.pkg']}
-          actionLabel={pathPickerMulti ? t('pkg.pathPickerMultiAction') : t('pkg.pathPickerAction')}
+          actionLabel={t('pkg.pathPickerMultiAction')}
           onClose={() => setPathPickerOpen(false)}
           onSelect={(selected) => {
-            if (pathPickerMulti) stageConsolePaths(selected)
-            else { setPath(selected); setPathPickerOpen(false) }
+            setPickerDir(selected[0].replace(/\/[^/]+$/, '') || '/')
+            stageConsolePaths(selected)
           }}
         />
       )}

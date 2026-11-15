@@ -877,6 +877,20 @@ html.pmgr-ps5 [tabindex]:focus {
   max-height: calc(100vh - 32px);
 }
 
+/* On the console the picker fills most of the screen: the cursor needs big targets and a long list. */
+html.pmgr-ps5 .pmgr-path-picker {
+  max-width: 60rem;
+  height: calc(100vh - 48px);
+  max-height: none;
+}
+html.pmgr-ps5 .pmgr-path-picker-row {
+  min-height: 64px;
+  font-size: 1.0625rem;
+}
+html.pmgr-ps5 .pmgr-path-picker-volumes button {
+  min-height: 60px;
+}
+
 @media (max-height: 700px) {
   .pmgr-path-picker-overlay { padding: 0.5rem; }
   .pmgr-path-picker { max-height: calc(100vh - 16px); }
@@ -1005,6 +1019,45 @@ html.pmgr-ps5 [tabindex]:focus {
 .pmgr-row-in {
   animation: pmgr-row-in 0.25s ease-out both;
   animation-delay: min(calc(var(--ti, 0) * 18ms), 200ms);
+}
+
+/* A background job (or the whole tray) folds away when it is cleared: fades, slides out and collapses.
+   --leave-h is its measured height; --ti staggers the cards a little. Off on the console and with reduced motion. */
+@keyframes pmgr-job-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+    max-height: var(--leave-h, 160px);
+  }
+  55% {
+    opacity: 0;
+    transform: translateX(16px);
+    max-height: var(--leave-h, 160px);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(16px);
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+    border-width: 0;
+  }
+}
+.pmgr-job-out {
+  overflow: hidden;
+  animation: pmgr-job-out 0.32s ease-in both;
+  animation-delay: min(calc(var(--ti, 0) * 40ms), 160ms);
+}
+html.pmgr-ps5 .pmgr-job-out,
+.pmgr-low-power .pmgr-job-out {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pmgr-job-out {
+    animation: none;
+  }
 }
 
 /* Notification badge pops when the unread count changes, instead of just

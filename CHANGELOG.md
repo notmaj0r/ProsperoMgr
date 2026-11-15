@@ -2,7 +2,42 @@
 
 Versions older than the current release are collapsed below — click a version to expand it.
 
-## v1.2
+## v1.2.1
+
+### Added
+- **Apps:** Prospero Manager's own tile is listed in the Apps tab.
+- **Payload Repositories:** ps5-web-browser-fullscreen (owendswang) was added.
+- **Folder picker (Copy to, Move to, Extract to):** game folders show the game's name and cover, like the Files list. On the PS5 browser the picker is larger, with taller rows.
+- **Files, `.ffpfsc` and `.ffpkg` images** named after a title ID show the game's name and cover, when the game is installed on the console.
+- **Account tools:** changing an Account ID now warns that saves belong to that ID and points to Restore backup.
+- **Payload Repositories:** cards show the payload's logo, taken from the Payload Manager mirror when it lists one and otherwise from the repository itself (`sce_sys/icon0.png`, `assets/icon0.png`, `icon0.png`, `icon.png`, `logo.png`). Prospero Manager's own card shows its logo. Repositories without a logo look as before.
+- **Logos work offline:** the logos found for repositories and payloads are saved in `repo_icons` under the Prospero folder (a few hundred KB) and reused, so they still show without internet and are not searched again on every start. A logo is checked again after two weeks, and "no logo" after one week.
+- **Payloads page and Autoloader:** payload cards, the Autoloader steps, the list of payloads to add and the live run timeline show the project's logo (the initial, or the usual icon, when there is none). It is taken as follows: from the repository a payload was downloaded from, from Payload Manager's record next to it, or from a catalog project with the same name.
+
+### Changed
+- **Clearing background jobs is animated** on the desktop: the finished jobs (or the whole tray) fade, slide out and fold away instead of disappearing at once. The console browser and reduced-motion settings skip it.
+- **Copying folders and extracting zips with many small files is faster:** files under 8 MB are handled by several threads at once and flushed to disk once at the end instead of one by one. Large files are handled as before.
+- **New version notice:** when a newer release is found (and automatic updates are off), the console shows a notification once per version, in the system language.
+- **Version number:** it sits under the Prospero Manager name in the sidebar instead of in the top bar. On narrow screens, where the sidebar is hidden, it stays in the top bar.
+- **Repository logo search** no longer writes a log line for every path it tries that does not exist.
+- **Network changes:** when the console's IP address changes (Wi-Fi to cable, or back) or the network comes back, a notification shows the new address Prospero is listening on.
+- **Install PKG, review step:** each game shows a larger cover, its name, title ID, package count and total size. Every package shows its type (Game, Update or DLC) in colour, version, size and file name, numbered in install order when a game has several, with warnings in their own box. The storage check shows free space, what is needed and what is left.
+- **PKG install order:** an update or DLC in the queue now waits until its base game has finished installing on the console, not only until the console accepted it. If the base game fails or is missing, its updates are skipped with a clear reason and the other games carry on.
+- **Install PKG, On this PS5:** one "Choose PKG files…" button opens the picker with several packages selectable at once, with their sizes and a Select all for each folder; ticks stay while you move between folders, and the picker reopens in the last folder used.
+- **Startup notifications:** "by maj0r" stays in English in every language and sits on its own line. The "Listening on" notice starts on a new line under the title.
+- **File copies that run out of space** now log how many bytes were written and what the drive reports as free, to help diagnose full drives.
+
+### Fixed
+- **Install PKG review:** an update no longer warns that "the base game is not on the console" when the base game is in the same list and will be installed first.
+- **Texts that stayed in English now follow the language:** "Unavailable" for the IP address when the console has no network, the connection and upload errors, the network errors (cannot reach GitHub, timeouts, rate limits), the installer's "not enough space" and "console refuses this package" explanations, the release and repository messages, and two labels (Portuguese fan, French package).
+- **Home no longer stalls without internet:** names that are looked up on the PlayStation Store are skipped for 10 minutes after the Store cannot be reached, instead of waiting for a timeout on every load.
+- **Home, Payloads running** counts every running payload, including those started by Payload Manager or another loader. It used to count only library files whose name matched the process exactly, so versioned files such as `websrv_v0.34.elf` were missed.
+- **The Copy to / Move to picker** said "select the package to install" under its title; it now asks for the destination folder.
+- **Payload Manager payloads in `.bin` format** (etaHEN, for example) were not listed. Subfolders now accept `.elf`, `.bin` and `.self`, like the Payloads directory itself.
+
+<details>
+<summary><b>v1.2</b></summary>
+
 
 ### Added
 - **Media page:** lists the PS5's screenshots and clips grouped into albums by game, with All / Screenshots / Videos filters and day headings. Viewer with previous/next, playback where the browser supports it, and download. Several items can be selected for download. Thumbnails are generated on the console and cached.
@@ -10,7 +45,7 @@ Versions older than the current release are collapsed below — click a version 
 - **Media, leftovers cleanup:** captures that the console still lists but whose image no longer exists are counted in a notice with a Clean up button, which removes their gallery rows and remaining files.
 - **Media, game names:** albums use the game name stored in the console's gallery database, so captures of uninstalled games keep their own named album.
 - **Media albums:** Albums tab with one cover per game, item count and size. Captures of the Home screen are grouped in their own album, and captures of games no longer installed in one shared album. Select all, and Download as ZIP (one archive instead of one file per capture). Thumbnails enlarged to 560 px. Clips show a frame on computers and phones.
-- **Home library: Games and Apps tabs.** Games and apps are listed apart. Apps holds installed apps and homebrew (Netflix, YouTube, Spotify, CheatRunner, ShadowMount+, the Homebrew Launcher and others), told apart by the `app.db` fields `is3rdPartyVideoApp` and `categoryType`. Streaming apps no longer appear under Games, system entries stay hidden and the platform filter applies to Games only. Prospero Manager's own tile is listed too.
+- **Home library: Games and Apps tabs.** Games and apps are listed apart. Apps holds installed apps and homebrew (Netflix, YouTube, Spotify, CheatRunner, ShadowMount+, the Homebrew Launcher and others), told apart by the `app.db` fields `is3rdPartyVideoApp` and `categoryType`. Streaming apps no longer appear under Games, system entries stay hidden and the platform filter applies to Games only.
 - **Play time chip on game covers:** a dark chip with a clock and the time played ("33 min", "2 h", "5 h 20 min"), in the language of the interface, like the console's home screen. Titles never played show no chip.
 - **Home game cards:** the game size is shown next to the version, on one line with icons.
 - **Console notifications in the system language:** the toasts shown on the PS5 (autoloader, save backups, installs, updates, startup) follow the console's language, in 16 languages. System languages without a translation use the closest one, or English. The log stays in English.
@@ -146,6 +181,8 @@ Versions older than the current release are collapsed below — click a version 
 - **The PKG page threw "can't access lexical declaration"** when the upload connection had already closed, which cancelled the install.
 - **Faster folder uploads:** folders are created in one request, and small files are flushed to disk once at the end instead of one by one.
 - **A DLC or small package rejected as a stream** can now be installed from USB or storage.
+
+</details>
 
 <details>
 <summary><b>v1.1</b></summary>

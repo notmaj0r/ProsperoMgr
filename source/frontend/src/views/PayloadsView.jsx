@@ -22,6 +22,7 @@ import { usePolling } from '../lib/usePolling.js'
 import { formatFileSize } from '../lib/format.js'
 import { isPS5 } from '../lib/effects.js'
 import { isPayloadLikeProcessName } from '../lib/processes.js'
+import PayloadLogo from '../components/PayloadLogo.jsx'
 
 // Process names on the PS5 can come back truncated/without extension —
 // match loosely both ways instead of requiring an exact filename match.
@@ -100,12 +101,7 @@ const PayloadButton = memo(function PayloadButton({ p, index, pinMode, busy, run
           aria-label={p.name}
           className="flex min-w-0 flex-1 items-center rounded-2xl p-4 pb-2 text-left"
         >
-          <span
-            aria-hidden="true"
-            className={`mr-4 grid h-14 w-14 shrink-0 place-items-center rounded-xl bg-panel-2 text-2xl font-bold uppercase ${disabled ? 'text-text-dim' : 'text-accent'}`}
-          >
-            {name.charAt(0)}
-          </span>
+          <PayloadLogo repo={p.icon_repo} name={name} size="xl" dim={disabled} className="mr-4" />
           <span className="min-w-0 flex-1">
             <span className={`line-clamp-2 block break-words text-lg font-bold leading-tight ${disabled ? 'text-text-dim' : 'text-text'}`} title={p.name}>{name}</span>
             <span className="mt-1 block truncate text-sm text-text-dim">
@@ -176,6 +172,7 @@ const PayloadButton = memo(function PayloadButton({ p, index, pinMode, busy, run
 export default function PayloadsView({ onNavigate }) {
   const { t, locale } = useI18n()
   const [payloads, setPayloads] = useState([])
+  const [iconsPending, setIconsPending] = useState(false)
   const [catalog, setCatalog] = useState([])
   const [updateEntry, setUpdateEntry] = useState(null) // catalog entry currently open in the download dialog
   const [processes, setProcesses] = useState([])
@@ -205,10 +202,20 @@ export default function PayloadsView({ onNavigate }) {
     loadAutoloader()
     api.payloads
       .list()
-      .then((r) => setPayloads(r.payloads))
+      .then((r) => {
+        setPayloads(r.payloads)
+        setIconsPending(Boolean(r.icons_pending))
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoaded(true))
   }, [loadAutoloader])
+
+  // Logos are looked up in the background; ask again until that is done.
+  useEffect(() => {
+    if (!iconsPending) return undefined
+    const timer = window.setTimeout(load, 2000)
+    return () => window.clearTimeout(timer)
+  }, [iconsPending, payloads, load])
 
   useEffect(() => {
     load()

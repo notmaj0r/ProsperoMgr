@@ -35,6 +35,7 @@
 #include "klog_client.hpp"
 #include "log.hpp"
 #include "payload_catalog.hpp"
+#include "repo_icons.hpp"
 #include "pkg_installer.hpp"
 #include "media.hpp"
 #include "usb_eject.hpp"
@@ -244,7 +245,41 @@ private:
     bool active_ = false;
 };
 
-std::string PayloadToJson(const PayloadInfo &p) {
+// A payload's name without extension or version suffix: "websrv_v0.34.elf" -> "websrv".
+std::string PayloadBaseName(const std::string &name) {
+    std::string base = name.substr(0, name.find_last_of('.') == std::string::npos ? name.size() : name.find_last_of('.'));
+    for (size_t i = 1; i + 2 < base.size(); i++) {
+        if ((base[i] == '_' || base[i] == '-') && base[i + 1] == 'v' && std::isdigit(static_cast<unsigned char>(base[i + 2]))) {
+            base.resize(i);
+            break;
+        }
+    }
+    std::transform(base.begin(), base.end(), base.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return base;
+}
+
+// The repository a payload's logo is looked up in: where it was downloaded from, the Payload Manager record
+// next to it, or the catalog project that has the same name. Empty when none applies.
+std::string PayloadIconRepo(const PayloadInfo &p, const std::vector<PayloadCatalogEntry> &catalog) {
+    if (!p.source_url.empty()) return p.source_url;
+    std::ifstream meta(std::filesystem::path(p.path).parent_path() / "meta.json");
+    if (meta.is_open()) {
+        std::string text((std::istreambuf_iterator<char>(meta)), std::istreambuf_iterator<char>());
+        std::string source = JsonExtractString(text, "source");
+        if (!source.empty()) return source;
+    }
+    std::string base = PayloadBaseName(p.name);
+    for (const auto &entry : catalog) {
+        RepoRef ref;
+        std::string ignored;
+        std::string repo = ParseRepositoryUrl(entry.url, &ref, &ignored) ? ref.repo : "";
+        std::transform(repo.begin(), repo.end(), repo.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (base == repo) return entry.url;
+    }
+    return "";
+}
+
+std::string PayloadToJson(const PayloadInfo &p, const std::string &icon_repo = "") {
     return JsonWriter()
         .Str("name", p.name)
         .Str("path", p.path)
@@ -258,6 +293,7 @@ std::string PayloadToJson(const PayloadInfo &p) {
         .Str("installed_version", p.installed_version)
         .Str("source", p.source)
         .Str("source_url", p.source_url)
+        .Str("icon_repo", icon_repo)
         .Done();
 }
 
@@ -311,7 +347,7 @@ std::string CatalogEntrySlug(const std::string &name) {
     return out;
 }
 
-std::string PayloadCatalogEntryToJson(const PayloadCatalogEntry &entry, const CatalogVersionStatus &status) {
+std::string PayloadCatalogEntryToJson(const PayloadCatalogEntry &entry, const CatalogVersionStatus &status, bool has_icon = false) {
     return JsonWriter()
         .Str("id", CatalogEntrySlug(entry.name))
         .Str("developer", entry.developer)
@@ -323,6 +359,7 @@ std::string PayloadCatalogEntryToJson(const PayloadCatalogEntry &entry, const Ca
         .Str("version_state", status.state)
         .Str("version_error", status.error)
         .Int("checked_at", status.checked_at_unix)
+        .Bool("icon", has_icon)
         .Done();
 }
 
@@ -1311,6 +1348,16 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         return HttpResponse::Json(JsonWriter().Bool("installed", found.installed).Str("version", found.version).Done());
     });
 
+    // Where the console's own install of a package stands, so a queue can wait for a base game before its updates.
+    server->Route("GET", "/api/pkg/install-status", [](const HttpRequest &req) {
+        std::string status;
+        int error_code = 0;
+        bool known = QueryPkgInstallStatus(req.Query("content_id"), &status, &error_code);
+        bool finished = known && error_code == 0 && (status == "playable" || status == "completed");
+        bool failed = known && (error_code != 0 || status == "error");
+        return HttpResponse::Json(JsonWriter().Bool("known", known).Str("status", status).Bool("finished", finished).Bool("failed", failed).Done());
+    });
+
     server->Route("POST", "/api/pkg/cancel", [](const HttpRequest &) {
         CancelPkgInstall();
         return HttpResponse::Json(JsonWriter().Bool("ok", true).Done());
@@ -1364,8 +1411,18 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
 
     server->Route("GET", "/api/payloads", [registry](const HttpRequest &) {
         std::vector<std::string> items;
-        for (const auto &p : registry->List()) items.push_back(PayloadToJson(p));
-        return HttpResponse::Json(JsonWriter().Raw("payloads", JsonWriter::Array(items)).Done());
+        std::vector<std::string> repos;
+        std::string icon_mime, icon_bytes;
+        auto catalog = GetPayloadCatalog();
+        auto payloads = registry->List();
+        for (const auto &p : payloads) repos.push_back(PayloadIconRepo(p, catalog));
+        ScanRepoIcons(repos);
+        for (size_t i = 0; i < payloads.size(); i++) {
+            // Only a repository whose logo was found is reported, so the page asks for images that exist.
+            bool has_icon = !repos[i].empty() && FindRepoIcon(repos[i], &icon_mime, &icon_bytes);
+            items.push_back(PayloadToJson(payloads[i], has_icon ? repos[i] : ""));
+        }
+        return HttpResponse::Json(JsonWriter().Raw("payloads", JsonWriter::Array(items)).Bool("icons_pending", RepoIconScanRunning()).Done());
     });
 
     server->Route("POST", "/api/payloads/launch", [registry](const HttpRequest &req) {
@@ -2140,18 +2197,35 @@ void RegisterApiRoutes(HttpServer *server, const Config &cfg, PayloadRegistry *r
         CatalogRefreshStatus status = GetCatalogRefreshStatus();
 
         std::vector<std::string> items;
+        std::vector<std::string> urls;
+        std::string icon_mime, icon_bytes;
         for (const auto &entry : GetPayloadCatalog()) {
             auto it = versions.find(entry.url);
-            items.push_back(PayloadCatalogEntryToJson(entry, it != versions.end() ? it->second : CatalogVersionStatus{}));
+            // The logo is tested here so the page only asks for images that exist.
+            items.push_back(PayloadCatalogEntryToJson(entry, it != versions.end() ? it->second : CatalogVersionStatus{},
+                                                      FindRepoIcon(entry.url, &icon_mime, &icon_bytes)));
+            urls.push_back(entry.url);
         }
+        ScanRepoIcons(urls);
         std::string body = JsonWriter()
                                .Raw("entries", JsonWriter::Array(items))
+                               .Bool("icons_pending", RepoIconScanRunning())
                                .Bool("refreshing", status.running)
                                .Int("completed", status.completed)
                                .Int("total", status.total)
                                .Str("error", err)
                                .Done();
         return HttpResponse::Json(std::move(body));
+    });
+
+    server->Route("GET", "/api/catalog/icon", [](const HttpRequest &req) {
+        HttpResponse resp;
+        if (!FindRepoIcon(req.Query("url"), &resp.content_type, &resp.body)) return HttpResponse::Error("no icon", 404);
+        // The image comes from a third-party index, so it may only be drawn, never run, if opened on its own.
+        resp.extra_headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+        resp.extra_headers["X-Content-Type-Options"] = "nosniff";
+        resp.extra_headers["Cache-Control"] = "private, max-age=86400";
+        return resp;
     });
 
     // Track a repo for its latest release; still browse-only. The URL goes through

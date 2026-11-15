@@ -29,6 +29,7 @@
 #include "notify.hpp"
 #include "notify_text.hpp"
 #include "payload_catalog.hpp"
+#include "repo_icons.hpp"
 #include "payload_registry.hpp"
 #include "pkg_installer.hpp"
 #include "process_manager.hpp"
@@ -181,6 +182,7 @@ int main() {
     InitializeJobQueue();
     InitializeFileJobs(cfg);
     InitializePayloadCatalog(cfg);
+    InitializeRepoIcons(cfg);
     InitializeGithubToken(cfg);
     CleanupStalePkgFiles(cfg);
     std::printf("[Prospero Manager] root: %s\n", cfg.root_dir.c_str());
@@ -216,7 +218,7 @@ int main() {
     // Two separate toasts instead of one combined multi-line one — each is
     // its own piece of news (which build is running, where to reach it).
     Notify(NotifyText(Msg::kStartup, {{"version", kVersion}, {"author", kAuthor}}));
-    NotifyDebug("Prospero Manager: " + NotifyText(Msg::kListening, {{"address", address}}));
+    NotifyDebug("Prospero Manager:\n" + NotifyText(Msg::kListening, {{"address", address}}));
     LogEvent(std::string("Prospero Manager v") + kVersion + " (built " + __DATE__ + " " + __TIME__ + ") listening on " + address);
 
     // SIGCONT asks the HTTP listener to rebuild after standby.

@@ -1,5 +1,6 @@
 const TONES = {
   neutral: 'bg-panel-border text-text-dim',
+  accent: 'bg-accent/15 text-accent',
   // "ok" is reserved for real status (running, installed, signed-in), so green
   // doesn't leak onto labels that aren't a status.
   ok: 'bg-ok/15 text-ok',

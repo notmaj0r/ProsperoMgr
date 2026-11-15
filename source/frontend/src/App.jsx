@@ -217,7 +217,7 @@ export default function App() {
       <div className="pmgr-bg" />
       <div className="pmgr-aurora-blob" />
       <div className="pmgr-aurora-blob pmgr-aurora-blob-2" />
-      <NavRail active={active} onChange={navigate} />
+      <NavRail active={active} onChange={navigate} version={status?.version} />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <Header

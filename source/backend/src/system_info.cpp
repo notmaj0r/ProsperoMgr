@@ -20,8 +20,9 @@ namespace {
 
 std::string LocalIpAddress() {
     ifaddrs *list = nullptr;
-    if (getifaddrs(&list) != 0) return "Unavailable";
-    std::string result = "Unavailable";
+    // Empty when there is no address: the page words that itself, in the user's language.
+    if (getifaddrs(&list) != 0) return "";
+    std::string result;
     for (ifaddrs *it = list; it; it = it->ifa_next) {
         if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET ||
             std::strncmp(it->ifa_name, "lo", 2) == 0) continue;

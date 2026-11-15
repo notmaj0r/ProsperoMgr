@@ -121,6 +121,15 @@ export async function preloadSavedLocale() {
 
 export const I18nContext = createContext(null)
 
+// The active translator, for code that runs outside a component (api.js and friends build error messages).
+let activeTranslate = null
+
+export function translate(key, vars) {
+  if (activeTranslate) return activeTranslate(key, vars)
+  const template = resolveKey(enUS, key)
+  return template === undefined ? key : interpolate(resolvePlurals(template, vars, DEFAULT_LOCALE), vars)
+}
+
 export function I18nProvider({ children }) {
   const [locale, setLocaleState] = useState(loadSavedLocale)
   // The active dictionary has to live in state too: a module-level cache hit
@@ -161,6 +170,8 @@ export function I18nProvider({ children }) {
     template = resolvePlurals(template, vars, locale)
     return interpolate(template, vars)
   }, [dict, locale])
+
+  activeTranslate = t
 
   const value = useMemo(() => ({ locale, setLocale, t, direction: directionFor(locale) }), [locale, setLocale, t])
 

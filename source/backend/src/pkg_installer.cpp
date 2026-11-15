@@ -1137,6 +1137,15 @@ std::string PkgRejectionHint(const std::string &helper_error) {
 
 } // namespace
 
+bool QueryPkgInstallStatus(const std::string &content_id, std::string *status, int *error_code) {
+    // The id goes into a helper command line, so only a plain content id is passed on.
+    if (content_id.empty() || content_id.size() > 64) return false;
+    for (unsigned char c : content_id) {
+        if (!std::isalnum(c) && c != '-' && c != '_') return false;
+    }
+    return QueryHelperInstallStatus(content_id, status, error_code);
+}
+
 bool UninstallTitle(const Config &cfg, const std::string &title_id, std::string *err) {
     for (int attempt = 0; attempt < 2; attempt++) {
         std::string error;

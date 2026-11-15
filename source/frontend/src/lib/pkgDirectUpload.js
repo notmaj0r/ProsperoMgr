@@ -2,6 +2,8 @@
 // RAM cache (pkg_ws_upload.cpp) so nothing lands on PS5 storage — see pkg_live_cache.hpp.
 
 import { isPS5 } from './effects.js'
+import { localizeError } from './errors.js'
+import { translate } from './i18n.jsx'
 
 const SEG_SIZE = 1024 * 1024
 // A refused segment is resent whole, so retries are rare and one at a time.
@@ -187,10 +189,10 @@ export function directUploadPkg(file, onProgress, title = '') {
             posting--
             if (msg.op === 'ack') onAck(index)
             else if (msg.op === 'busy') onBusy(index)
-            else settle(() => reject(new Error('The console refused part of the package.')))
+            else settle(() => reject(new Error(translate('errors.consolePartRefused'))))
             pump()
           })
-          .catch((err) => settle(() => reject(err instanceof Error ? err : new Error('could not read the file'))))
+          .catch((err) => settle(() => reject(err instanceof Error ? err : new Error(translate('errors.readFailed')))))
       }
     }
 
@@ -332,7 +334,7 @@ export function directUploadPkg(file, onProgress, title = '') {
         // Stay connected: the console keeps pulling from this session well past
         // "complete" — the socket only closes once the backend is done with it.
       } else if (msg.op === 'error') {
-        settle(() => reject(new Error(msg.error || 'direct install failed')))
+        settle(() => reject(new Error(localizeError(msg.error) || translate('errors.directInstallFailed'))))
         ws.close()
       }
     }
@@ -340,7 +342,7 @@ export function directUploadPkg(file, onProgress, title = '') {
     // The backend closes the socket once the console is done reading, which can beat the "complete" reply.
     const lost = () => {
       if (segCount > 0 && ackedOnce.size >= segCount) settle(resolve)
-      else settle(() => reject(new Error('Connection to Prospero Manager was interrupted.')))
+      else settle(() => reject(new Error(translate('errors.networkInterrupted'))))
     }
 
     ws.onerror = lost

@@ -4,10 +4,12 @@
 #include <strings.h>
 #include <sys/stat.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <mutex>
 #include <set>
@@ -366,12 +368,17 @@ void WriteTitleCache(const Config &cfg, const std::string &title_id, const std::
 
 // Last resort before falling back to just the title ID: an unauthenticated GET of the game's
 // public Store page, reading the name out of its embedded JSON-LD block.
-bool FetchStoreTitleName(const std::string &content_id, std::string *out) {
+bool FetchStoreTitleName(const std::string &content_id, std::string *out, bool *unreachable) {
     if (content_id.empty()) return false;
 
     HttpsResponse resp;
     std::string err;
-    if (!HttpsClient::Get("https://store.playstation.com/en-us/product/" + content_id, &resp, &err)) return false;
+    NetErrorKind kind = NetErrorKind::kNone;
+    if (!HttpsClient::Get("https://store.playstation.com/en-us/product/" + content_id, &resp, &err, &kind)) {
+        // No route to the Store at all (as opposed to a page that is missing).
+        if (unreachable) *unreachable = kind != NetErrorKind::kHttp;
+        return false;
+    }
 
     const std::string open_tag = "<script id=\"mfe-jsonld-tags\" type=\"application/ld+json\">";
     size_t start = resp.body.find(open_tag);
@@ -647,6 +654,8 @@ std::vector<TitleInfo> ListTitles(const Config &cfg, bool include_apps) {
     // Last resort for content with a blank TITLE: look the name up on the PS
     // Store, cached to disk and capped so one page load can't stack requests.
     int online_lookups_left = 5;
+    // Without internet each lookup waits for a timeout, so after one failure the Store is left alone for a while.
+    static std::atomic<int64_t> store_retry_at{0};
     for (auto &t : out) {
         if (!IsUnresolvedName(t.title_id, t.name)) continue;
 
@@ -655,16 +664,19 @@ std::vector<TitleInfo> ListTitles(const Config &cfg, bool include_apps) {
             t.name = cached;
             continue;
         }
-        if (online_lookups_left <= 0) continue;
+        if (online_lookups_left <= 0 || std::time(nullptr) < store_retry_at.load()) continue;
 
         std::string content_id;
         if (!ReadInstalledContentId(t.title_id, &content_id)) continue;
 
         std::string store_name;
+        bool unreachable = false;
         online_lookups_left--;
-        if (FetchStoreTitleName(content_id, &store_name)) {
+        if (FetchStoreTitleName(content_id, &store_name, &unreachable)) {
             t.name = store_name;
             WriteTitleCache(cfg, t.title_id, store_name);
+        } else if (unreachable) {
+            store_retry_at = std::time(nullptr) + 600;
         }
     }
 

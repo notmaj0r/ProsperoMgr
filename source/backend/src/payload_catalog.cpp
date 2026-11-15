@@ -64,6 +64,8 @@ const std::vector<PayloadCatalogEntry> kCatalog = {
 
     {"owendswang", "ps5-fan-control", "Daemon that sets the system fan temperature threshold.",
      "https://github.com/owendswang/ps5-fan-control"},
+    {"owendswang", "ps5-web-browser-fullscreen", "Makes the PS5 web browser open in fullscreen mode.",
+     "https://github.com/owendswang/ps5-web-browser-fullscreen"},
     {"owendswang", "ps5-web-file-manager", "File manager with a web UI, made for copying game dumps between storages.",
      "https://github.com/owendswang/ps5-web-file-manager"},
 

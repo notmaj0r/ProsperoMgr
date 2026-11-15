@@ -10,6 +10,7 @@ import { RefreshIcon, ExternalIcon, GithubIcon, PlusIcon, DeleteIcon, DownloadIc
 import { api } from '../lib/api.js'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useI18n } from '../lib/i18n.jsx'
+import { localizeError } from '../lib/errors.js'
 import { formatDate } from '../lib/format.js'
 
 function hostBadge(url) {
@@ -66,8 +67,9 @@ export default function RepositoryView() {
       setEntries(result.entries || [])
       setLoading(Boolean(result.refreshing))
       setRefreshInfo(result.refreshing ? result : null)
-      if (result.refreshing) {
-        pollRef.current = window.setTimeout(() => load(false, true), 750)
+      // Logos are looked up in the background; ask again until that is done.
+      if (result.refreshing || result.icons_pending) {
+        pollRef.current = window.setTimeout(() => load(false, true), result.refreshing ? 750 : 2000)
       }
     }).catch((requestError) => {
       setLoading(false)
@@ -110,11 +112,11 @@ export default function RepositoryView() {
         setEntries((current) =>
           current.map((item) =>
             item.url === entry.url
-              ? { ...item, version: result.version, version_state: result.state, version_error: result.error, checked_at: result.checked_at }
+              ? { ...item, version: result.version, version_state: result.state, version_error: localizeError(result.error), checked_at: result.checked_at }
               : item,
           ),
         )
-        if (result.state !== 'ok' && result.error) showToast(result.error, 'err')
+        if (result.state !== 'ok' && result.error) showToast(localizeError(result.error), 'err')
       })
       .catch((e) => showToast(e.message, 'err'))
       .finally(() =>
@@ -227,16 +229,19 @@ export default function RepositoryView() {
                     className="group flex min-w-0 flex-col rounded-xl border border-panel-border bg-panel p-3.5 transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-accent/35 hover:shadow-[0_10px_26px_-14px_rgba(0,0,0,0.5)] focus-within:-translate-y-0.5 focus-within:border-accent/35"
                   >
                     <div className="flex min-w-0 items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate font-bold text-text">{entry.name}</span>
-                          {entry.custom && (
-                            <span className="shrink-0 rounded-md border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-accent">
-                              {t('common.custom')}
-                            </span>
-                          )}
+                      <div className="flex min-w-0 flex-1 items-start">
+                        {(entry.icon || OWN_REPO_URL.test(entry.url)) && <RepoIcon url={entry.url} />}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <span className="truncate font-bold text-text">{entry.name}</span>
+                            {entry.custom && (
+                              <span className="shrink-0 rounded-md border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-accent">
+                                {t('common.custom')}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed text-text-dim">{entry.description}</p>
                         </div>
-                        <p className="mt-1 text-xs leading-relaxed text-text-dim">{entry.description}</p>
                       </div>
                       {entry.custom && (
                         <ActionMenu
@@ -353,6 +358,23 @@ export default function RepositoryView() {
   )
 }
 
+// This app's own logo ships with the page, so its card needs no download.
+const OWN_REPO_URL = /^https:\/\/github\.com\/notmaj0r\/ProsperoMgr\/?$/i
+
+// A repository's logo. Only rendered for entries that have one.
+function RepoIcon({ url }) {
+  const [failed, setFailed] = useState(false)
+  if (failed) return null
+  return (
+    <img
+      src={OWN_REPO_URL.test(url) ? '/icon-180.png' : api.catalog.iconUrl(url)}
+      alt=""
+      onError={() => setFailed(true)}
+      className="mr-3 h-11 w-11 shrink-0 rounded-lg bg-panel-2 object-cover"
+    />
+  )
+}
+
 function VersionBadge({ entry, busy, t }) {
   if (busy) {
     return <span className="pmgr-mono rounded-md bg-bg px-2 py-1 opacity-60">{t('repositories.checking')}</span>
@@ -366,7 +388,7 @@ function VersionBadge({ entry, busy, t }) {
     return <span className="pmgr-mono rounded-md bg-bg px-2 py-1" dir="ltr">{entry.version}</span>
   }
   return (
-    <span className="rounded-md bg-bg px-2 py-1 opacity-70" title={entry.version_error}>
+    <span className="rounded-md bg-bg px-2 py-1 opacity-70" title={localizeError(entry.version_error)}>
       {t('repositories.versionUnknown')}
     </span>
   )

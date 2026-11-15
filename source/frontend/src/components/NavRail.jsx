@@ -144,7 +144,7 @@ function MobileMoreSheet({ active, onClosed, onOpen, t }) {
   )
 }
 
-export default function NavRail({ active, onChange }) {
+export default function NavRail({ active, onChange, version }) {
   const { t } = useI18n()
   const [moreOpen, setMoreOpen] = useState(false)
   const navListRef = useRef(null)
@@ -175,15 +175,16 @@ export default function NavRail({ active, onChange }) {
       >
         <div className="flex h-[92px] shrink-0 items-center gap-3 overflow-hidden border-b border-panel-border px-[15px]">
           <img
-            src="/icon-64.png"
+            src="/icon-180.png"
             alt="Prospero Manager"
-            className="h-12 w-12 max-w-none shrink-0 rounded-xl border border-accent/40 shadow-[0_0_28px_-4px_var(--color-accent)]"
+            className="h-12 w-12 max-w-none shrink-0 rounded-[14px] ring-1 ring-white/10 shadow-[0_8px_20px_-8px_rgba(0,0,0,0.75)]"
           />
           <div
             className="min-w-0 flex-1 overflow-hidden whitespace-nowrap transition-[opacity] duration-200"
             style={{ opacity: collapsed ? 0 : 1, transitionDelay: collapsed ? '0ms' : '120ms' }}
           >
             <div className="text-[15px] font-extrabold tracking-tight text-text">Prospero Manager</div>
+            {version && <div className="pmgr-mono mt-0.5 text-xs font-semibold text-text-dim" dir="ltr">v{version}</div>}
           </div>
         </div>
 

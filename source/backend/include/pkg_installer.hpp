@@ -44,6 +44,10 @@ struct InstalledTitle {
 // Looks for the game in the console's app folders, so the UI can warn before an upload.
 InstalledTitle FindInstalledTitle(const std::string &title_id);
 
+// The console's own status for an install ("playable" or "completed" once it is done, "error" on failure),
+// by content ID. False when the installer could not be asked.
+bool QueryPkgInstallStatus(const std::string &content_id, std::string *status, int *error_code);
+
 // Holds the cover art the browser read from a package until its live upload starts installing.
 void StagePkgCover(const std::string &png);
 

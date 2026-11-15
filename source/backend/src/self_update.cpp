@@ -113,6 +113,13 @@ bool CheckForUpdate() {
         bool usable = asset_url.rfind(kAssetUrlPrefix, 0) == 0;
         g_asset_url = usable ? asset_url : "";
         g_status.available = usable && IsNewer(g_status.latest, g_status.current);
+        // Once per version: the page has its own badge, this is for someone not looking at it. Automatic mode
+        // goes straight to the "Updating" notice instead.
+        static std::string notified_version;
+        if (g_status.available && !g_status.auto_update && notified_version != g_status.latest) {
+            notified_version = g_status.latest;
+            Notify("Prospero Manager\n" + NotifyText(Msg::kUpdateAvailable, {{"version", g_status.latest}}));
+        }
         if (!usable && IsNewer(g_status.latest, g_status.current)) g_status.error = "the release has no ProsperoMgr.elf file";
     }
     g_checking = false;

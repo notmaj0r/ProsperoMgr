@@ -1,9 +1,10 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Panel from '../components/Panel.jsx'
-import FadeImage from '../components/FadeImage.jsx'
+import GameCover from '../components/GameCover.jsx'
 import DropZone from '../components/DropZone.jsx'
 import { FILES_PATH_KEY, filesHash, filesPathFromHash } from '../lib/filesPath.js'
 import { useBackLayer } from '../lib/backLayer.js'
+import { useGameFolders } from '../lib/useGameFolders.js'
 import { useTransfers } from '../lib/transfers.js'
 import { POLL_SCALE } from '../lib/usePolling.js'
 import Button from '../components/Button.jsx'
@@ -32,6 +33,7 @@ import { api } from '../lib/api.js'
 import { loadJobsAutoClear } from '../lib/jobsAutoClear.js'
 import { useToast } from '../lib/ToastContext.jsx'
 import { useI18n } from '../lib/i18n.jsx'
+import { localizeError } from '../lib/errors.js'
 import { formatFileSize, formatDate, volumeLabel, volumeBarClass } from '../lib/format.js'
 
 function formatSpeed(bytesPerSec, locale) {
@@ -273,11 +275,44 @@ const JOB_STATE_KEYS = {
 
 const sameJobs = (a, b) => a.length === b.length && JSON.stringify(a) === JSON.stringify(b)
 
+// Whether a job leaving the list should fold away: not on the console, not with reduced motion or reduced effects.
+function motionAllowed() {
+  return !isPS5() && !document.documentElement.classList.contains('pmgr-low-power') &&
+    !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+}
+
+// A job that drops out of the list, whatever the reason (Clear finished, the automatic clear, another tab), stays
+// on screen as a "ghost" for the length of the fold-away animation and is then removed.
+const LEAVE_MS = 520
+
 function FileJobsTray({ jobs, locale, onCancel, onClear, t }) {
-  if (!jobs.length) return null
+  const heights = useRef(new Map()) // each card's height, so it can fold away smoothly
+  const rootRef = useRef(null)
+  const [ghosts, setGhosts] = useState([])
+  const [previous, setPrevious] = useState(jobs)
+  if (previous !== jobs) {
+    // Worked out while rendering, so the removed cards never go missing for even one frame.
+    const gone = previous.filter((job) => !jobs.some((current) => current.id === job.id))
+    setPrevious(jobs)
+    if (gone.length > 0 && motionAllowed()) setGhosts((list) => [...list.filter((g) => !gone.some((job) => job.id === g.id)), ...gone])
+  }
+  useEffect(() => {
+    if (ghosts.length === 0) return undefined
+    const timer = window.setTimeout(() => setGhosts([]), LEAVE_MS)
+    return () => window.clearTimeout(timer)
+  }, [ghosts])
+  const leaving = new Set(ghosts.map((job) => job.id))
+  const shown = ghosts.length ? [...jobs, ...ghosts.filter((g) => !jobs.some((job) => job.id === g.id))].sort((a, b) => a.id - b.id) : jobs
+  if (!shown.length) return null
   const active = jobs.filter((job) => ['queued', 'scanning', 'running'].includes(job.state))
+  // When every card is leaving, the whole tray folds away instead of its cards one by one.
+  const allLeaving = jobs.length === 0
   return (
-    <div className="mb-3 rounded-xl border border-panel-border bg-bg/55 p-3">
+    <div
+      ref={rootRef}
+      className={`mb-3 rounded-xl border border-panel-border bg-bg/55 p-3 ${allLeaving ? 'pmgr-job-out' : ''}`}
+      style={allLeaving ? { '--leave-h': `${rootRef.current?.offsetHeight || 400}px` } : undefined}
+    >
       <div className="mb-2 flex items-center justify-between gap-3">
         <div>
           <div className="text-xs font-bold uppercase tracking-wide text-text">{t('files.backgroundJobs')}</div>
@@ -286,17 +321,22 @@ function FileJobsTray({ jobs, locale, onCancel, onClear, t }) {
         {active.length === 0 && <Button size="sm" tone="ghost" onClick={onClear}>{t('files.clearFinished')}</Button>}
       </div>
       <div className="space-y-2">
-        {jobs.slice().reverse().map((job) => {
+        {shown.slice().reverse().map((job, position) => {
           const pct = job.total > 0 ? Math.min(100, (job.completed / job.total) * 100) : 0
           const canCancel = ['queued', 'scanning', 'running'].includes(job.state)
           // Multi-source zip jobs join sources with '\n' — show a count instead of a mangled path.
           const sourceCount = job.source.includes('\n') ? job.source.split('\n').length : 1
           const sourceLabel = sourceCount > 1 ? t('common.itemsCount', { count: sourceCount }) : job.source.split('/').pop()
           const typeLabel = t(JOB_TYPE_KEYS[job.type] || 'common.unknown')
-          const errorText = job.error_code && ERROR_CODE_KEYS[job.error_code] ? t(ERROR_CODE_KEYS[job.error_code]) : job.error
+          const errorText = job.error_code && ERROR_CODE_KEYS[job.error_code] ? t(ERROR_CODE_KEYS[job.error_code]) : localizeError(job.error)
           const etaSeconds = job.speed > 0 ? (job.total - job.completed) / job.speed : Infinity
           return (
-            <div key={job.id} className="pmgr-row-in rounded-lg border border-panel-border px-3 py-2 text-xs">
+            <div
+              key={job.id}
+              ref={(el) => { if (el && !leaving.has(job.id)) heights.current.set(job.id, el.offsetHeight) }}
+              className={`pmgr-row-in rounded-lg border border-panel-border px-3 py-2 text-xs ${leaving.has(job.id) && !allLeaving ? 'pmgr-job-out' : ''}`}
+              style={leaving.has(job.id) && !allLeaving ? { '--leave-h': `${heights.current.get(job.id) || 160}px`, '--ti': position } : undefined}
+            >
               <div className="flex items-center gap-2">
                 <span className="rounded bg-panel-border px-1.5 py-0.5 font-bold uppercase text-text-dim">{typeLabel}</span>
                 <span className="min-w-0 flex-1 truncate text-text" title={job.source}>{sourceLabel}</span>
@@ -350,7 +390,7 @@ function FolderPickerModal({ entries, sourceDir, type, initialPath, volumes, onC
   return (
     <PathPickerModal
       title={single ? `${label} "${entries[0].name}"` : `${label} (${entries.length})`}
-      description={t('pkg.pathPickerDesc')}
+      description={t('files.pickDestinationDesc')}
       initialPath={initialPath}
       volumes={volumes}
       mode="folder"
@@ -510,13 +550,6 @@ function BulkDeleteDialog({ entries, onClose, onConfirm }) {
   )
 }
 
-// Game folders show the game's cover; a missing or broken image falls back to the plain folder icon.
-function GameCover({ game }) {
-  const [failed, setFailed] = useState(false)
-  if (!game.has_icon || failed) return <span className="pmgr-game-cover grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-panel-2"><FolderIcon size={18} /></span>
-  return <FadeImage src={api.games.iconUrl(game)} alt="" loading="lazy" onError={() => setFailed(true)} className="pmgr-game-cover h-11 w-11 shrink-0 rounded-lg object-cover" />
-}
-
 // Memoized — the 1s file-jobs poll below otherwise re-renders every row,
 // regardless of directory size.
 const FileRow = memo(function FileRow({
@@ -655,6 +688,7 @@ export default function FtpView() {
   const [pathInput, setPathInput] = useState(path)
   const [editingPathBar, setEditingPathBar] = useState(false)
   const [entries, setEntries] = useState([])
+  const games = useGameFolders(entries, path)
   const [search, setSearch] = useState(() => window.sessionStorage.getItem(SEARCH_SESSION_KEY) || '')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -668,7 +702,6 @@ export default function FtpView() {
   const [sizeFilter, setSizeFilter] = useState('any')
   const [dateFilter, setDateFilter] = useState('any')
   const [pins, setPins] = useState(loadPins)
-  const [games, setGames] = useState({}) // folder path -> game name and cover
   const [rowLimit, setRowLimit] = useState(ROW_PAGE)
   const [pendingDeletes, setPendingDeletes] = useState(() => new Set())
   const [sortDirection, setSortDirection] = useState(() => localStorage.getItem('pmgr-files-sort-direction') || 'asc')
@@ -835,32 +868,6 @@ export default function FtpView() {
   }
 
   useEffect(() => setRowLimit(ROW_PAGE), [path])
-
-  // Game folders and .exfat images are recognised by their sce_sys metadata, whatever they are named.
-  useEffect(() => {
-    const pending = entries
-      .filter((e) => e.is_dir || /\.exfat$/i.test(e.name))
-      .map((e) => joinPath(path, e.name))
-      .filter((p) => !(p in games))
-    if (pending.length === 0) return
-    let cancelled = false
-    // Batches keep one request small, and a folder with hundreds of games still gets all of them identified.
-    const identifyFrom = (offset) => {
-      const batch = pending.slice(offset, offset + 150)
-      if (batch.length === 0 || cancelled) return
-      api.games
-        .identify(batch)
-        .then((r) => {
-          if (cancelled) return
-          const found = Object.fromEntries((r.games || []).map((g) => [g.path, g]))
-          setGames((prev) => ({ ...prev, ...Object.fromEntries(batch.map((p) => [p, found[p] || null])) }))
-          identifyFrom(offset + 150)
-        })
-        .catch(() => {})
-    }
-    identifyFrom(0)
-    return () => { cancelled = true }
-  }, [entries, path]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const openDir = useCallback((name) => load(joinPath(path, name)), [load, path])
   const goUp = () => {
