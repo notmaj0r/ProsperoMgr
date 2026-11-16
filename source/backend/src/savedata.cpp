@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -25,6 +26,7 @@
 #include "archive_paths.hpp"
 #include "file_jobs.hpp"
 #include "file_manager.hpp"
+#include "gdrive.hpp"
 #include "log.hpp"
 #include "miniz.h"
 #include "notify.hpp"
@@ -647,6 +649,47 @@ SaveBackupResult WriteBackup(const std::string &root, bool is_usb, const std::st
     return result;
 }
 
+// The same zip the USB/internal destinations get, built in scratch space and uploaded to Google
+// Drive. Nothing stays on the console afterwards; retention (last 5) is applied in Drive.
+SaveBackupResult WriteBackupGdrive(const Config &cfg, const std::string &title_id,
+                                   const std::vector<std::string> &paths) {
+    SaveBackupResult result;
+    result.destination = kGdriveDestination;
+    auto fail = [&result](const std::string &code, const std::string &message) {
+        result.code = code;
+        result.error = message;
+        return result;
+    };
+    if (!GdriveBackupActive(cfg)) return fail("gdrive_not_linked", "Google Drive is not linked");
+
+    static std::atomic<unsigned> counter{0}; // a manual and an automatic backup can overlap
+    std::error_code ec;
+    fs::create_directories(cfg.tmp_dir, ec);
+    std::string staged_path = cfg.tmp_dir + "/gdrive_upload_" + std::to_string(counter.fetch_add(1)) + ".zip";
+
+    std::string zip_err;
+    if (!ZipSavesToFile(paths, staged_path, &zip_err)) {
+        fs::remove(staged_path, ec);
+        return fail("write_failed", zip_err);
+    }
+    mz_zip_archive check_zip{};
+    bool intact = mz_zip_reader_init_file(&check_zip, staged_path.c_str(), 0) &&
+                  mz_zip_reader_get_num_files(&check_zip) == paths.size();
+    mz_zip_reader_end(&check_zip);
+    if (!intact) {
+        fs::remove(staged_path, ec);
+        return fail("verify_failed", "the written backup did not verify");
+    }
+
+    std::string upload_err, upload_code;
+    bool uploaded = GdriveUploadBackup(cfg, title_id, Timestamp() + ".zip", staged_path, &upload_err, &upload_code);
+    fs::remove(staged_path, ec);
+    if (!uploaded) return fail(upload_code.empty() ? "write_failed" : upload_code, upload_err);
+    result.ok = true;
+    result.code = "ok";
+    return result;
+}
+
 } // namespace
 
 SaveBackupConfig GetSaveBackupConfig(const Config &cfg) {
@@ -822,6 +865,16 @@ std::vector<SaveBackupResult> BackupTitleSavesEach(const Config &cfg, const std:
     // Every configured drive gets its own copy; the internal default is only used when no
     // drive was chosen, never as a stand-in for one that is missing.
     std::vector<SaveBackupResult> results;
+
+    // "Google Drive only": try Drive first and write nothing locally when it works. A failed upload
+    // falls through to the local destinations below, so a save is never left without a copy.
+    const bool drive_active = GdriveBackupActive(cfg);
+    const bool drive_first = drive_active && GdriveDriveOnly(cfg);
+    if (drive_first) {
+        results.push_back(WriteBackupGdrive(cfg, title_id, paths));
+        if (results.back().ok) return results;
+    }
+
     std::vector<std::string> destinations = GetSaveBackupConfig(cfg).destinations;
     if (destinations.empty()) {
         results.push_back(WriteBackup(DefaultBackupRoot(cfg), false, title_id, paths, source_bytes));
@@ -829,6 +882,9 @@ std::vector<SaveBackupResult> BackupTitleSavesEach(const Config &cfg, const std:
     for (const auto &destination : destinations) {
         results.push_back(WriteBackup(destination, true, title_id, paths, source_bytes));
     }
+    // Google Drive is an extra copy on top of whatever local destination is set, and a missing
+    // connection there never stops the local backups above from having been written.
+    if (drive_active && !drive_first) results.push_back(WriteBackupGdrive(cfg, title_id, paths));
     return results;
 }
 
@@ -850,6 +906,7 @@ namespace {
 
 // "USB 0" for /mnt/usb0, so a notification names the drive instead of a path.
 std::string DriveLabel(const std::string &path) {
+    if (path == kGdriveDestination) return "Google Drive";
     if (path.rfind("/mnt/usb", 0) == 0 && path.size() > 8) return std::string("USB ") + path[8];
     if (path.rfind("/mnt/ext0", 0) == 0) return NotifyText(Msg::kDriveExtUsb);
     return NotifyText(Msg::kDriveInternal);
@@ -1138,7 +1195,22 @@ bool StartSaveRestoreJob(const Config &cfg, const std::string &backup_path, cons
 
     StartBackgroundThread([cfg, backup_path, snapshot_first] {
         std::string restore_err, restore_code;
-        bool ok = RestoreSaveBackup(cfg, backup_path, &restore_err, &restore_code, snapshot_first);
+        std::string local_path = backup_path;
+        const std::string drive_prefix = kGdrivePathPrefix;
+        const bool from_drive = backup_path.rfind(drive_prefix, 0) == 0;
+        std::error_code ec;
+        if (from_drive) {
+            // Pull the zip down first; from here on it restores exactly like a local backup.
+            fs::create_directories(cfg.tmp_dir, ec);
+            local_path = cfg.tmp_dir + "/gdrive_restore.zip";
+            if (!GdriveDownload(cfg, backup_path.substr(drive_prefix.size()), local_path, &restore_err, &restore_code)) {
+                fs::remove(local_path, ec);
+                FinishSaveJob(false, restore_err, restore_code);
+                return;
+            }
+        }
+        bool ok = RestoreSaveBackup(cfg, local_path, &restore_err, &restore_code, snapshot_first);
+        if (from_drive) fs::remove(local_path, ec);
         FinishSaveJob(ok, restore_err, restore_code);
         if (ok) Notify("Prospero Manager\n" + NotifyText(Msg::kSaveRestored));
     });

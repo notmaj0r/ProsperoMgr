@@ -84,9 +84,14 @@ void LogResult(const std::string &label, const prosperomgr_http_result &result) 
         LogEvent("PS5 HTTP complete: " + label + " (HTTP " + std::to_string(result.http_status) + ")");
         return;
     }
+    std::string route;
+    if (result.attempts > 0) {
+        route = " attempts=" + std::to_string(result.attempts) +
+                " ip=" + (result.resolved_ip[0] ? std::string(result.resolved_ip) : std::string("host"));
+    }
     LogEvent("PS5 HTTP failed: " + label + " (kind=" + std::to_string(result.kind) +
              " http_status=" + std::to_string(result.http_status) + " sce_code=" +
-             std::to_string(result.sce_code) + ")");
+             std::to_string(result.sce_code) + route + ")");
 }
 
 } // namespace
@@ -133,9 +138,10 @@ bool HttpsClient::Get(const std::string &url, HttpsResponse *out, std::string *e
 
 bool HttpsClient::DownloadToFile(const std::string &url, const std::string &local_path,
                                  std::string *err, const DownloadProgressFn &progress, NetErrorKind *kind,
-                                 const DownloadCancelFn &cancel) {
+                                 const DownloadCancelFn &cancel, const std::string &bearer_token) {
     if (kind) *kind = NetErrorKind::kNone;
     std::string label = RequestLabel(url);
+    std::string auth_value = bearer_token.empty() ? "" : ("Bearer " + bearer_token);
 
     std::lock_guard<std::mutex> lock(g_transfer_mu);
     LogEvent("PS5 HTTP download begin: " + label);
@@ -161,7 +167,9 @@ bool HttpsClient::DownloadToFile(const std::string &url, const std::string &loca
                                            progress ? +trampoline : nullptr,
                                            progress ? const_cast<DownloadProgressFn *>(&progress) : nullptr,
                                            cancel ? +cancelTrampoline : nullptr,
-                                           cancel ? const_cast<DownloadCancelFn *>(&cancel) : nullptr);
+                                           cancel ? const_cast<DownloadCancelFn *>(&cancel) : nullptr,
+                                           bearer_token.empty() ? nullptr : "Authorization",
+                                           bearer_token.empty() ? nullptr : auth_value.c_str());
     LogResult(label, result);
     if (result.bytes > 0 && result.total_ms > 0) {
         long long kb_s = result.bytes / result.total_ms; // bytes/ms == KB/s
@@ -176,6 +184,61 @@ bool HttpsClient::DownloadToFile(const std::string &url, const std::string &loca
         if (err) *err = FriendlyMessage(detected, RequestHost(url), static_cast<int>(result.http_status), "");
         return false;
     }
+    return true;
+}
+
+bool HttpsClient::Request(const std::string &method, const std::string &url, const HttpHeaders &headers,
+                          const void *body, size_t body_len, HttpsReply *out, std::string *err,
+                          NetErrorKind *kind) {
+    if (!out) {
+        if (err) *err = "missing response destination";
+        return false;
+    }
+    *out = HttpsReply{};
+    if (kind) *kind = NetErrorKind::kNone;
+
+    int method_id = -1;
+    if (method == "GET") method_id = PROSPEROMGR_HTTP_GET;
+    else if (method == "POST") method_id = PROSPEROMGR_HTTP_POST;
+    else if (method == "PUT") method_id = PROSPEROMGR_HTTP_PUT;
+    else if (method == "DELETE") method_id = PROSPEROMGR_HTTP_DELETE;
+    if (method_id < 0 || url.rfind("https://", 0) != 0) {
+        if (err) *err = "unsupported request";
+        return false;
+    }
+
+    std::vector<prosperomgr_http_header> raw;
+    raw.reserve(headers.size());
+    for (const auto &h : headers) raw.push_back({h.first.c_str(), h.second.c_str()});
+
+    std::string label = method + " " + RequestLabel(url);
+    std::lock_guard<std::mutex> lock(g_transfer_mu);
+    LogEvent("PS5 HTTP begin: " + label);
+
+    prosperomgr_http_result result{};
+    char *resp_body = nullptr;
+    size_t resp_len = 0;
+    char location[2048];
+    char range[128];
+    int rc = prosperomgr_ps5_http_request(method_id, url.c_str(), raw.data(), raw.size(), body, body_len,
+                                          &resp_body, &resp_len, kMaxBufferedResponse, location, sizeof(location),
+                                          range, sizeof(range), &result);
+    LogResult(label, result);
+    out->status = static_cast<int>(result.http_status);
+
+    if (rc != 0) {
+        if (resp_body) free(resp_body);
+        NetErrorKind detected = ClassifyHttpResult(result);
+        if (kind) *kind = detected;
+        if (err) *err = FriendlyMessage(detected, RequestHost(url), out->status, "");
+        return false;
+    }
+    if (resp_body) {
+        out->body.assign(resp_body, resp_len);
+        free(resp_body);
+    }
+    out->location = location;
+    out->range = range;
     return true;
 }
 

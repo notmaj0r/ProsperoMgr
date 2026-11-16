@@ -11,6 +11,7 @@ import SegmentedControl from '../components/SegmentedControl.jsx'
 import ActionMenu from '../components/ActionMenu.jsx'
 import { SkeletonRows } from '../components/Skeleton.jsx'
 import PathPickerModal from '../components/PathPickerModal.jsx'
+import GdriveDestination from '../components/GdriveDestination.jsx'
 import { ConfirmDialog } from '../components/Dialog.jsx'
 import { DownloadIcon, UploadIcon, RefreshIcon, SaveIcon, DeleteIcon, ShieldIcon, FolderIcon } from '../components/icons.jsx'
 import { api } from '../lib/api.js'
@@ -36,6 +37,8 @@ const SAVE_ERROR_KEYS = {
   unpack_failed: 'saves.errorUnpackFailed',
   replace_failed: 'saves.errorReplaceFailed',
   delete_failed: 'saves.errorDeleteFailed',
+  gdrive_auth: 'saves.errorGdriveAuth',
+  gdrive_not_linked: 'saves.errorGdriveNotLinked',
 }
 
 function saveErrorText(t, code, fallback) {
@@ -125,6 +128,14 @@ function SaveArtwork({ save }) {
   )
 }
 
+// A Google Drive backup can be restored or deleted from here, but not downloaded through the console.
+function backupMenuItems(b, t, { onDownload, onDelete }) {
+  const items = []
+  if (!b.remote) items.push({ label: t('saves.download'), icon: <DownloadIcon size={15} />, onClick: onDownload }, '-')
+  items.push({ label: t('saves.deleteBackupTitle2'), icon: <DeleteIcon size={15} />, tone: 'danger', onClick: onDelete })
+  return items
+}
+
 function BackupRow({ b, busy, onDownload, onRestore, onDelete, t, locale }) {
   return (
     <div data-menu-host className="flex flex-wrap items-center gap-3 rounded-lg border border-panel-border px-3 py-2">
@@ -134,13 +145,7 @@ function BackupRow({ b, busy, onDownload, onRestore, onDelete, t, locale }) {
       </div>
       <div className="flex shrink-0 items-center">
         <Button size="sm" tone="neutral" disabled={busy} onClick={onRestore}>{t('saves.restore')}</Button>
-        <ActionMenu
-          items={[
-            { label: t('saves.download'), icon: <DownloadIcon size={15} />, onClick: onDownload },
-            '-',
-            { label: t('saves.deleteBackupTitle2'), icon: <DeleteIcon size={15} />, tone: 'danger', onClick: onDelete },
-          ]}
-        />
+        <ActionMenu items={backupMenuItems(b, t, { onDownload, onDelete })} />
       </div>
     </div>
   )
@@ -152,6 +157,9 @@ function AutoBackupPanel({ refreshKey, onJobStarted }) {
   const { t, locale } = useI18n()
   const [config, setConfig] = useState(null)
   const [backups, setBackups] = useState(null)
+  const [driveBackups, setDriveBackups] = useState([])
+  const [gdriveOn, setGdriveOn] = useState(false)
+  const [gdriveOnly, setGdriveOnly] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [busyPath, setBusyPath] = useState('')
   const [dialog, setDialog] = useState(null) // { kind: 'restore'|'delete', backup }
@@ -168,6 +176,20 @@ function AutoBackupPanel({ refreshKey, onJobStarted }) {
     setLoadError('')
     api.saves.getBackupConfig().then(setConfig).catch((error) => setLoadError(error.message))
     api.saves.listBackups().then((r) => setBackups(r.backups || [])).catch((error) => setLoadError(error.message))
+    // Drive is asked separately and last: it waits on the network, and a slow or offline Google
+    // must never hold up the backups that are already on the console or a USB drive.
+    api.gdrive
+      .status()
+      .then((g) => {
+        setGdriveOn(g.linked && g.enabled)
+        setGdriveOnly(g.linked && g.enabled && g.drive_only)
+        if (!(g.linked && g.enabled)) return setDriveBackups([])
+        return api.gdrive
+          .backups()
+          .then((r) => setDriveBackups(r.backups || []))
+          .catch((error) => showToast(t('saves.gdriveListError', { message: saveErrorText(t, error.error_code, error.message) }), 'err'))
+      })
+      .catch(() => {})
   }
   useEffect(load, [refreshKey])
   useEffect(() => {
@@ -252,13 +274,13 @@ function AutoBackupPanel({ refreshKey, onJobStarted }) {
   const groups = useMemo(() => {
     if (!backups) return null
     const byTitle = new Map()
-    for (const b of backups) {
+    for (const b of [...backups, ...driveBackups]) {
       if (!byTitle.has(b.title_id)) byTitle.set(b.title_id, { title_id: b.title_id, title_name: b.title_name, platform: b.platform, items: [] })
       byTitle.get(b.title_id).items.push(b)
     }
     for (const g of byTitle.values()) g.items.sort((a, b) => b.created_unix - a.created_unix)
     return [...byTitle.values()].sort((a, b) => b.items[0].created_unix - a.items[0].created_unix)
-  }, [backups])
+  }, [backups, driveBackups])
 
   const destIssue = Boolean(config?.destinations?.some((d) => d.state !== 'ok'))
   const settingsShown = settingsOpen ?? destIssue
@@ -311,7 +333,12 @@ function AutoBackupPanel({ refreshKey, onJobStarted }) {
             <div className={`mr-3 flex min-w-0 items-center text-xs ${destIssue ? 'text-err' : 'text-text-dim'}`}>
               <FolderIcon size={13} className="mr-1.5 shrink-0" />
               <span className="truncate pmgr-mono" dir="ltr">
-                {config.destinations.length ? config.destinations.map((d) => d.path).join(' · ') : t('saves.backupDestInternal')}
+                {gdriveOnly
+                  ? t('saves.gdriveTitle')
+                  : [
+                      config.destinations.length ? config.destinations.map((d) => d.path).join(' · ') : t('saves.backupDestInternal'),
+                      gdriveOn ? t('saves.gdriveTitle') : '',
+                    ].filter(Boolean).join(' · ')}
               </span>
             </div>
             <button
@@ -364,6 +391,7 @@ function AutoBackupPanel({ refreshKey, onJobStarted }) {
                     <Button className="ml-2" size="icon" tone="ghost" title={t('saves.backupDestRemove')} onClick={() => removeDestination(d.path)} icon={<DeleteIcon size={15} />} />
                   </div>
                 ))}
+                <GdriveDestination onChanged={load} />
               </div>
             </div>
           </div>
@@ -427,11 +455,10 @@ function AutoBackupPanel({ refreshKey, onJobStarted }) {
                   <div className="flex shrink-0 items-center">
                     <Button size="sm" tone="neutral" disabled={busyPath === latest.path} onClick={() => setDialog({ kind: 'restore', backup: latest })}>{t('saves.restore')}</Button>
                     <ActionMenu
-                      items={[
-                        { label: t('saves.download'), icon: <DownloadIcon size={15} />, onClick: () => window.open(api.saves.backupDownloadUrl(latest.path), '_blank') },
-                        '-',
-                        { label: t('saves.deleteBackupTitle2'), icon: <DeleteIcon size={15} />, tone: 'danger', onClick: () => setDialog({ kind: 'delete', backup: latest }) },
-                      ]}
+                      items={backupMenuItems(latest, t, {
+                        onDownload: () => window.open(api.saves.backupDownloadUrl(latest.path), '_blank'),
+                        onDelete: () => setDialog({ kind: 'delete', backup: latest }),
+                      })}
                     />
                   </div>
                 </div>

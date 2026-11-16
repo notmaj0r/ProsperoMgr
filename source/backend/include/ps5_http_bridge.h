@@ -41,6 +41,11 @@ struct prosperomgr_http_result {
     long long total_ms; // wall time of the read/write loop, setup excluded
     long long read_ms;  // time spent inside sceHttpReadData
     long long write_ms; // time spent inside write()
+    // prosperomgr_ps5_http_request only: the address it last connected to by IP ("" when it used
+    // the hostname) and how many connection attempts it made. For logs, so a refused connection
+    // can be traced to a wrong DNS answer.
+    char resolved_ip[48];
+    int attempts;
 };
 
 // Buffers the whole body in memory (up to max_body_bytes), so only use it for small responses.
@@ -61,9 +66,36 @@ int prosperomgr_ps5_http_range(const char *url, long long start, long long end, 
 
 // Streams the response body straight to `out_path` in fixed chunks — never fully in RAM.
 // `progress` (if non-NULL) fires roughly every 80ms plus once at the end; `cancel` is polled the same way.
+// header_name/header_value add one extra request header (e.g. Authorization) on the first hop only, or NULL.
 int prosperomgr_ps5_http_download(const char *url, const char *out_path, struct prosperomgr_http_result *result,
                                   prosperomgr_ps5_http_progress_fn progress, void *progress_opaque,
-                                  prosperomgr_ps5_http_cancel_fn cancel, void *cancel_opaque);
+                                  prosperomgr_ps5_http_cancel_fn cancel, void *cancel_opaque,
+                                  const char *header_name, const char *header_value);
+
+// One request header for prosperomgr_ps5_http_request.
+struct prosperomgr_http_header {
+    const char *name;
+    const char *value;
+};
+
+// sceHttp method ids used by prosperomgr_ps5_http_request.
+enum prosperomgr_http_method {
+    PROSPEROMGR_HTTP_GET = 0,
+    PROSPEROMGR_HTTP_POST = 1,
+    PROSPEROMGR_HTTP_PUT = 4,
+    PROSPEROMGR_HTTP_DELETE = 5,
+};
+
+// General request with an optional in-memory body. Unlike the calls above this never follows
+// redirects and does NOT turn a non-2xx answer into a failure: it returns 0 whenever a response was
+// received, with the status in result->http_status, so a caller can read API error bodies and
+// protocol statuses such as 308. Returns -1 only for transport failures (result->kind says which).
+// *out_body is malloc'd (caller frees); out_location / out_range receive the Location and Range
+// response headers ("" when absent). Pass NULL for any output that is not needed.
+int prosperomgr_ps5_http_request(int method, const char *url, const struct prosperomgr_http_header *headers,
+                                 size_t header_count, const void *body, size_t body_len, char **out_body,
+                                 size_t *out_len, size_t max_body_bytes, char *out_location, size_t location_size,
+                                 char *out_range, size_t range_size, struct prosperomgr_http_result *result);
 
 #ifdef __cplusplus
 }
