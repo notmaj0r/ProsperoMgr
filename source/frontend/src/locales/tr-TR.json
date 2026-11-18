@@ -978,7 +978,13 @@
     "autoloaderQueued": "Sırada",
     "autoloaderLoadingNow": "Yükleniyor…",
     "autoloaderLoaded": "Yüklendi",
-    "autoloaderLoadedIn": "{time} içinde yüklendi"
+    "autoloaderLoadedIn": "{time} içinde yüklendi",
+    "navPosTitle": "Sidebar Position",
+    "navPosDesc": "Choose which side of the screen the navigation menu sits on.",
+    "navPosLeft": "Left",
+    "navPosLeftDesc": "Default sidebar placement on the left.",
+    "navPosRight": "Right",
+    "navPosRightDesc": "Moves the navigation menu to the right."
   },
   "onboarding": {
     "step1Title": "Prospero Manager'a Hoş Geldiniz",

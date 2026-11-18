@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 import { ToastProvider } from './lib/ToastContext.jsx'
-import { applyEffects, isPS5, loadReducedEffects, markFlexGap } from './lib/effects.js'
+import { applyEffects, applyNavPosition, isPS5, loadNavPosition, loadReducedEffects, markFlexGap } from './lib/effects.js'
 import { I18nProvider, applyLocaleToDocument, loadSavedLocale, preloadSavedLocale } from './lib/i18n.jsx'
 
 // Apply the saved theme before first paint — otherwise it only kicks in
@@ -19,6 +19,7 @@ if (savedTheme === 'light') {
 // a Reduced preference never flashes full motion first.
 document.documentElement.classList.toggle('pmgr-ps5', isPS5())
 applyEffects(loadReducedEffects())
+applyNavPosition(loadNavPosition())
 markFlexGap()
 
 // Paths, names and links are not prose, so the on-screen keyboard should not capitalize or correct them.
