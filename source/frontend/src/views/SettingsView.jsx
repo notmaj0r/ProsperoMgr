@@ -17,7 +17,7 @@ import {
   ExternalIcon, GithubIcon, ShieldIcon, PowerIcon, UserIcon, AlertTriangleIcon,
   FolderIcon, PlusIcon, DeleteIcon, CpuIcon,
 } from '../components/icons.jsx'
-import { EFFECTS_KEY, applyEffects, isPS5, loadReducedEffects } from '../lib/effects.js'
+import { EFFECTS_KEY, NAV_POS_KEY, applyEffects, applyNavPosition, isPS5, loadNavPosition, loadReducedEffects } from '../lib/effects.js'
 import { api } from '../lib/api.js'
 import { JOBS_AUTOCLEAR_KEY, JOBS_AUTOCLEAR_OPTIONS, loadJobsAutoClear } from '../lib/jobsAutoClear.js'
 import { useToast } from '../lib/ToastContext.jsx'
@@ -409,6 +409,42 @@ function VisualEffectsPanel() {
             <span className="text-sm font-bold text-text">{t(opt.labelKey)}</span>
             <span className="mt-0.5 block text-xs text-text-dim">{t(opt.descKey)}</span>
             {mode === opt.id && <span className="absolute right-3 top-3 rounded-full bg-accent px-2 py-0.5 text-xs font-bold text-white">{t('settings.active')}</span>}
+          </button>
+        ))}
+      </div>
+    </Panel>
+  )
+}
+
+const NAV_POS_OPTIONS = [
+  { id: 'left', labelKey: 'settings.navPosLeft', descKey: 'settings.navPosLeftDesc' },
+  { id: 'right', labelKey: 'settings.navPosRight', descKey: 'settings.navPosRightDesc' },
+]
+
+function SidebarPositionPanel() {
+  const { t } = useI18n()
+  const [pos, setPos] = useState(loadNavPosition)
+
+  useEffect(() => {
+    applyNavPosition(pos)
+    window.localStorage.setItem(NAV_POS_KEY, pos)
+  }, [pos])
+
+  return (
+    <Panel title={t('settings.navPosTitle')}>
+      <p className="mb-3 text-sm text-text-dim">{t('settings.navPosDesc')}</p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {NAV_POS_OPTIONS.map((opt) => (
+          <button
+            key={opt.id}
+            onClick={() => setPos(opt.id)}
+            className={`pmgr-theme-choice relative overflow-hidden rounded-xl border p-3 text-left ${
+              pos === opt.id ? 'is-selected border-accent/60 bg-accent/10' : 'border-panel-border bg-bg/45 hover:border-accent/35'
+            }`}
+          >
+            <span className="text-sm font-bold text-text">{t(opt.labelKey)}</span>
+            <span className="mt-0.5 block text-xs text-text-dim">{t(opt.descKey)}</span>
+            {pos === opt.id && <span className="absolute right-3 top-3 rounded-full bg-accent px-2 py-0.5 text-xs font-bold text-white">{t('settings.active')}</span>}
           </button>
         ))}
       </div>
@@ -1203,6 +1239,7 @@ export default function SettingsView({ settingsTab, onNavigate }) {
           <>
             <ThemePanel />
             <VisualEffectsPanel />
+            <SidebarPositionPanel />
           </>
         )}
         {tab === 'thermal' && <ThermalPanel />}

@@ -1,6 +1,17 @@
 // Visual Effects: Full/Reduced, set in Settings -> Appearance — distinct from the OS-level
 // prefers-reduced-motion query. Persisted like pmgr_theme, applied before first paint by main.jsx.
 export const EFFECTS_KEY = 'pmgr_effects'
+export const NAV_POS_KEY = 'pmgr_nav_pos'
+
+export function loadNavPosition() {
+  return window.localStorage.getItem(NAV_POS_KEY) === 'right' ? 'right' : 'left'
+}
+
+export function applyNavPosition(pos) {
+  const root = document.documentElement
+  if (pos === 'right') root.dataset.pmgrNav = 'right'
+  else delete root.dataset.pmgrNav
+}
 
 // The PS5's own browser identifies itself this way (no separate PS4/PS5
 // marker — "PlayStation" alone is enough, nothing else sends it).

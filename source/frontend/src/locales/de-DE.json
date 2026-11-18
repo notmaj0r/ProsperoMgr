@@ -978,7 +978,13 @@
     "autoloaderQueued": "Wartet",
     "autoloaderLoadingNow": "Lädt…",
     "autoloaderLoaded": "Geladen",
-    "autoloaderLoadedIn": "Geladen in {time}"
+    "autoloaderLoadedIn": "Geladen in {time}",
+    "navPosTitle": "Seitenleistenposition",
+    "navPosDesc": "Wähle aus, auf welcher Bildschirmseite das Navigationsmenü angezeigt wird.",
+    "navPosLeft": "Links",
+    "navPosLeftDesc": "Standardplatzierung auf der linken Seite.",
+    "navPosRight": "Rechts",
+    "navPosRightDesc": "Verschiebt das Navigationsmenü nach rechts."
   },
   "onboarding": {
     "step1Title": "Willkommen bei Prospero Manager",

@@ -978,7 +978,13 @@
     "autoloaderQueued": "Várakozik",
     "autoloaderLoadingNow": "Betöltés…",
     "autoloaderLoaded": "Betöltve",
-    "autoloaderLoadedIn": "Betöltve {time} alatt"
+    "autoloaderLoadedIn": "Betöltve {time} alatt",
+    "navPosTitle": "Sidebar Position",
+    "navPosDesc": "Choose which side of the screen the navigation menu sits on.",
+    "navPosLeft": "Left",
+    "navPosLeftDesc": "Default sidebar placement on the left.",
+    "navPosRight": "Right",
+    "navPosRightDesc": "Moves the navigation menu to the right."
   },
   "onboarding": {
     "step1Title": "Üdvözlünk a Prospero Managerben",

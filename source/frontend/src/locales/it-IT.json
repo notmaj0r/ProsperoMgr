@@ -978,7 +978,13 @@
     "autoloaderQueued": "In coda",
     "autoloaderLoadingNow": "Caricamento…",
     "autoloaderLoaded": "Caricato",
-    "autoloaderLoadedIn": "Caricato in {time}"
+    "autoloaderLoadedIn": "Caricato in {time}",
+    "navPosTitle": "Posizione barra laterale",
+    "navPosDesc": "Scegli su quale lato dello schermo posizionare il menu di navigazione.",
+    "navPosLeft": "Sinistra",
+    "navPosLeftDesc": "Posizione predefinita a sinistra.",
+    "navPosRight": "Destra",
+    "navPosRightDesc": "Sposta il menu di navigazione a destra."
   },
   "onboarding": {
     "step1Title": "Benvenuto in Prospero Manager",

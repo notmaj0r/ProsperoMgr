@@ -230,7 +230,7 @@ export default function NavRail({ active, onChange, version }) {
           title={collapsed ? t('nav.expand') : t('nav.collapse')}
           className="mx-2 mb-2 flex h-9 items-center gap-3 overflow-hidden rounded-xl px-3 text-text-dim transition-colors hover:bg-panel-border/70 hover:text-text"
         >
-          <span className="grid h-6 w-6 shrink-0 place-items-center">
+          <span className="pmgr-nav-collapse-icon grid h-6 w-6 shrink-0 place-items-center">
             <ChevronRightIcon size={15} className={`shrink-0 transition-transform duration-300 ${collapsed ? '' : 'rotate-180'}`} />
           </span>
           <span

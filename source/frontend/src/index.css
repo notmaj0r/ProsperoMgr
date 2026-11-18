@@ -334,6 +334,35 @@ html.pmgr-ps5 [tabindex]:focus {
   box-shadow: 18px 0 45px rgba(0, 0, 0, 0.16);
 }
 
+html[data-pmgr-nav="right"] .pmgr-app {
+  flex-direction: row-reverse;
+}
+
+html[data-pmgr-nav="right"] .pmgr-nav-shell {
+  border-right-width: 0;
+  border-left: 1px solid var(--color-panel-border);
+  box-shadow: -18px 0 45px rgba(0, 0, 0, 0.16);
+}
+
+html[data-pmgr-nav="right"] .pmgr-nav-item:hover {
+  transform: translateX(-2px);
+}
+
+html[data-pmgr-nav="right"] .pmgr-nav-item::before {
+  left: auto;
+  right: 0;
+  border-radius: 8px 0 0 8px;
+}
+
+html[data-pmgr-nav="right"] .pmgr-nav-collapse-icon {
+  transform: scaleX(-1);
+}
+
+html[data-pmgr-nav="right"] .pmgr-global-activity {
+  right: auto;
+  left: 18px;
+}
+
 .pmgr-nav-list {
   scrollbar-width: thin;
   scrollbar-color: var(--color-panel-border) transparent;
@@ -494,7 +523,9 @@ html.pmgr-ps5 [tabindex]:focus {
 }
 
 @media (max-width: 767px) {
-  .pmgr-global-activity {
+  .pmgr-global-activity,
+  html[data-pmgr-nav="right"] .pmgr-global-activity {
+    left: auto;
     right: 12px;
     bottom: calc(76px + env(safe-area-inset-bottom));
   }

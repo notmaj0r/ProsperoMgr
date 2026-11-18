@@ -978,7 +978,13 @@
     "autoloaderQueued": "排队中",
     "autoloaderLoadingNow": "加载中…",
     "autoloaderLoaded": "已加载",
-    "autoloaderLoadedIn": "用时 {time} 加载"
+    "autoloaderLoadedIn": "用时 {time} 加载",
+    "navPosTitle": "Sidebar Position",
+    "navPosDesc": "Choose which side of the screen the navigation menu sits on.",
+    "navPosLeft": "Left",
+    "navPosLeftDesc": "Default sidebar placement on the left.",
+    "navPosRight": "Right",
+    "navPosRightDesc": "Moves the navigation menu to the right."
   },
   "onboarding": {
     "step1Title": "欢迎使用 Prospero Manager",
